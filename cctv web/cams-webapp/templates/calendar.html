@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NVR Uptime/Downtime Calendar</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>NVR Uptime/Downtime</h1>
+      <div class="actions">
+        <a href="/" class="link-home">Home</a>
+        <a href="/settings" class="link-settings" style="margin-left:8px;">Settings</a>
+      </div>
+    </header>
+    <main>
+      <section class="panel">
+        <h2>Calendar</h2>
+        <div class="grid">
+          <label>
+            <span>From</span>
+            <input type="date" id="from-date" />
+          </label>
+          <label>
+            <span>To</span>
+            <input type="date" id="to-date" />
+          </label>
+          <div style="display:flex;align-items:flex-end;gap:8px;">
+            <button id="load-range">Load</button>
+            <small id="range-info" style="color:#6b7280"></small>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="calendar-toolbar">
+          <label style="display:flex;align-items:center;gap:8px;">
+            <span>Filter NVR</span>
+            <input type="text" id="nvr-filter" placeholder="name or IP" />
+          </label>
+          <div class="legend" title="Color scale shows downtime percentage per day">
+            <span>Legend:</span>
+            <span class="leg-box" style="background: rgb(0,180,80)"></span>
+            <span>0%</span>
+            <span class="leg-box" style="background: rgb(100,120,80)"></span>
+            <span>50%</span>
+            <span class="leg-box" style="background: rgb(200,0,80)"></span>
+            <span>100%</span>
+          </div>
+        </div>
+        <div id="calendar-container" class="calendar-scroll"></div>
+      </section>
+    </main>
+    <script>
+      function fmtDate(d) {
+        return d.toISOString().slice(0,10);
+      }
+      function toEpoch(d) {
+        return Math.floor(d.getTime() / 1000);
+      }
+      function startOfDay(d) {
+        const x = new Date(d);
+        x.setHours(0,0,0,0);
+        return x;
+      }
+      function endOfDay(d) {
+        const x = new Date(d);
+        x.setHours(23,59,59,999);
+        return x;
+      }
+
+      function defaultRange() {
+        const to = new Date();
+        const from = new Date();
+        from.setDate(from.getDate() - 13);
+        return { from, to };
+      }
+
+      function setRangeInputs(from, to) {
+        const f = document.getElementById('from-date');
+        const t = document.getElementById('to-date');
+        f.value = fmtDate(from);
+        t.value = fmtDate(to);
+        const info = document.getElementById('range-info');
+        info.textContent = `Showing ${fmtDate(from)} to ${fmtDate(to)}`;
+      }
+
+      async function loadNvrs() {
+        const res = await fetch('/api/nvrs');
+        return await res.json();
+      }
+
+      async function loadEvents(from, to) {
+        const q = new URLSearchParams({ from: String(toEpoch(from)), to: String(toEpoch(to)) });
+        const res = await fetch(`/api/events?${q.toString()}`);
+        return await res.json();
+      }
+
+      function buildDays(from, to) {
+        const days = [];
+        const cur = new Date(startOfDay(from));
+        const end = endOfDay(to);
+        while (cur <= end) {
+          days.push(new Date(cur));
+          cur.setDate(cur.getDate() + 1);
+        }
+        return days;
+      }
+
+      function computeDailyDowntime(dayStart, dayEnd, offlineIntervals) {
+        let total = 0;
+        for (const iv of offlineIntervals) {
+          const s = new Date(iv.start * 1000);
+          const e = new Date((iv.end ?? Math.floor(Date.now()/1000)) * 1000);
+          const overlapStart = new Date(Math.max(s.getTime(), dayStart.getTime()));
+          const overlapEnd = new Date(Math.min(e.getTime(), dayEnd.getTime()));
+          const durMs = overlapEnd - overlapStart;
+          if (durMs > 0) total += durMs;
+        }
+        const dayMs = dayEnd - dayStart;
+        const ratio = dayMs > 0 ? total / dayMs : 0;
+        return { millis: total, ratio };
+      }
+
+      function colorForRatio(r) {
+        const c = Math.max(0, Math.min(1, r));
+        const hue = 120 - Math.round(120 * c);
+        return `hsl(${hue}, 90%, 45%)`;
+      }
+
+      function renderCalendar(nvrs, events, days) {
+        const container = document.getElementById('calendar-container');
+        container.innerHTML = '';
+        const wrapper = document.createElement('div');
+        wrapper.className = 'calendar-wrapper';
+
+        const headerRow = document.createElement('div');
+        headerRow.className = 'calendar-row header';
+        headerRow.style.gridTemplateColumns = `220px repeat(${days.length}, 1fr)`;
+        const nameHeader = document.createElement('div');
+        nameHeader.className = 'cell name';
+        nameHeader.textContent = 'NVR (uptime %)';
+        headerRow.appendChild(nameHeader);
+        const headerDayCells = [];
+        for (let i = 0; i < days.length; i++) {
+          const d = days[i];
+          const c = document.createElement('div');
+          c.className = 'cell day';
+          const wk = d.toLocaleDateString(undefined, { weekday: 'short' });
+          const dt = d.toLocaleDateString();
+          c.textContent = `${wk}\n${dt}`;
+          headerRow.appendChild(c);
+          headerDayCells.push(c);
+        }
+        wrapper.appendChild(headerRow);
+
+        const filter = (document.getElementById('nvr-filter').value || '').toLowerCase();
+        const filteredNvrs = nvrs.filter(n => {
+          const txt = ((n.name || '') + ' ' + (n.ip || '')).toLowerCase();
+          return !filter || txt.includes(filter);
+        });
+        for (const nvr of filteredNvrs) {
+          const row = document.createElement('div');
+          row.className = 'calendar-row';
+          row.style.gridTemplateColumns = `220px repeat(${days.length}, 1fr)`;
+          const nameCell = document.createElement('div');
+          nameCell.className = 'cell name';
+          const offline = (events[nvr.ip] || []).filter(x => x.type === 'offline');
+          const totalMs = (endOfDay(days[days.length-1]) - startOfDay(days[0]));
+          let totalDownMs = 0;
+          for (let j = 0; j < days.length; j++) {
+            const d = days[j];
+            const dayStart = startOfDay(d);
+            const dayEnd = endOfDay(d);
+            const { millis } = computeDailyDowntime(dayStart, dayEnd, offline);
+            totalDownMs += millis;
+          }
+          const uptimePct = totalMs > 0 ? Math.max(0, 100 * (1 - (totalDownMs / totalMs))) : 100;
+          nameCell.textContent = `${nvr.name || ''} (${nvr.ip}) — ${uptimePct.toFixed(1)}%`;
+          row.appendChild(nameCell);
+          for (let j = 0; j < days.length; j++) {
+            const d = days[j];
+            const dayStart = startOfDay(d);
+            const dayEnd = endOfDay(d);
+            const { millis, ratio } = computeDailyDowntime(dayStart, dayEnd, offline);
+            const c = document.createElement('div');
+            c.className = 'cell day';
+            c.title = `${d.toLocaleDateString()} — downtime ${(millis/3600000).toFixed(2)}h`;
+            const outlineColor = millis === 0 ? '#d1d5db' : colorForRatio(ratio);
+            const outlineW = millis === 0 ? 2 : 3;
+            c.style.boxShadow = `inset 0 0 0 ${outlineW}px ${outlineColor}`;
+            c.addEventListener('mouseenter', () => {
+              nameCell.classList.add('active');
+              headerDayCells[j].classList.add('active');
+            });
+            c.addEventListener('mouseleave', () => {
+              nameCell.classList.remove('active');
+              headerDayCells[j].classList.remove('active');
+            });
+            c.addEventListener('click', () => showDayDetail(nvr, dayStart, dayEnd, offline));
+            row.appendChild(c);
+          }
+          wrapper.appendChild(row);
+        }
+        container.appendChild(wrapper);
+      }
+
+      function showDayDetail(nvr, dayStart, dayEnd, offlineIntervals) {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        const modal = document.createElement('div');
+        modal.className = 'modal';
+        const h = document.createElement('h3');
+        h.textContent = `${nvr.name || ''} (${nvr.ip}) — ${dayStart.toLocaleDateString()}`;
+        const list = document.createElement('div');
+        const items = [];
+        for (const iv of offlineIntervals) {
+          const s = new Date(iv.start * 1000);
+          const e = new Date((iv.end ?? Math.floor(Date.now()/1000)) * 1000);
+          if (e < dayStart || s > dayEnd) continue;
+          const start = new Date(Math.max(s.getTime(), dayStart.getTime()));
+          const end = new Date(Math.min(e.getTime(), dayEnd.getTime()));
+          const durMs = end - start;
+          if (durMs <= 0) continue;
+          items.push({ start, end, durMs });
+        }
+        items.sort((a,b) => a.start - b.start);
+        if (items.length === 0) {
+          list.textContent = 'No downtime intervals for this day.';
+        } else {
+          const ul = document.createElement('ul');
+          for (const it of items) {
+            const li = document.createElement('li');
+            li.textContent = `${it.start.toLocaleTimeString()} → ${it.end.toLocaleTimeString()}  (${(it.durMs/60000).toFixed(0)} min)`;
+            ul.appendChild(li);
+          }
+          list.appendChild(ul);
+        }
+        const close = document.createElement('button');
+        close.textContent = 'Close';
+        close.addEventListener('click', () => { document.body.removeChild(overlay); });
+        modal.appendChild(h);
+        modal.appendChild(list);
+        modal.appendChild(close);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+      }
+
+      async function init() {
+        const { from, to } = defaultRange();
+        setRangeInputs(from, to);
+        const nvrs = await loadNvrs();
+        const events = await loadEvents(from, to);
+        const days = buildDays(from, to);
+        renderCalendar(nvrs, events, days);
+        document.getElementById('load-range').addEventListener('click', async () => {
+          const fromInput = document.getElementById('from-date').value;
+          const toInput = document.getElementById('to-date').value;
+          if (!fromInput || !toInput) return;
+          const from = new Date(fromInput + 'T00:00:00');
+          const to = new Date(toInput + 'T23:59:59');
+          setRangeInputs(from, to);
+          const nvrs2 = await loadNvrs();
+          const events2 = await loadEvents(from, to);
+          const days2 = buildDays(from, to);
+          renderCalendar(nvrs2, events2, days2);
+        });
+        document.getElementById('nvr-filter').addEventListener('input', () => {
+          renderCalendar(nvrs, events, days);
+        });
+      }
+
+      window.addEventListener('DOMContentLoaded', init);
+    </script>
+    <style>
+      .calendar-scroll { overflow: auto; border: 1px solid #e5e7eb; border-radius: 8px; }
+      .calendar-wrapper { display: inline-block; min-width: 100%; }
+      .calendar-row { display: grid; }
+      .calendar-row.header { background: #f9fafb; font-weight: 600; position: sticky; top: 0; z-index: 10; }
+      .cell { padding: 8px; border-bottom: 1px solid #f3f4f6; border-right: 1px solid #f3f4f6; }
+      .cell.name { background: #f9fafb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: sticky; left: 0; z-index: 5; box-shadow: 1px 0 0 #e5e7eb; }
+      .cell.name.active { background: #e6f0ff; }
+      .cell.day { min-width: 90px; cursor: pointer; color: #111827; white-space: nowrap; position: relative; background: #ffffff; }
+      .cell.day:hover { box-shadow: inset 0 0 0 2px #9ca3af; }
+      .calendar-row.header .cell.day.active { background: #e6f0ff; }
+      .calendar-row:nth-child(odd) .cell.day { background: #fbfbfc; }
+      .calendar-toolbar { display:flex; align-items:center; justify-content: space-between; margin-bottom:8px; gap:12px; }
+      .legend { display:flex; align-items:center; gap:6px; color:#6b7280; }
+      .leg-box { width:20px; height:12px; display:inline-block; border:1px solid #d1d5db; border-radius:2px; }
+      @media (max-width: 1000px) {
+        .cell.day { min-width: 70px; }
+      }
+    </style>
+  </body>
+</html>

@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Settings - Cams WebApp</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Settings</h1>
+      <div class="actions">
+        <a class="link-home" href="/">Back</a>
+      </div>
+    </header>
+    <main>
+      <section class="panel">
+        <h2>Refresh Interval</h2>
+        <form id="refresh-form">
+          <div class="grid">
+            <label>
+              <span>Preset</span>
+              <select id="refresh-preset">
+                <option value="1">1 second</option>
+                <option value="10">10 seconds</option>
+                <option value="60">1 minute</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+            <label>
+              <span>Custom (seconds)</span>
+              <input type="number" id="refresh-custom" min="1" placeholder="e.g. 30" />
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="submit">Save Refresh</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>SMTP Server</h2>
+        <form id="smtp-form">
+          <div class="grid">
+            <label>
+              <span>Host</span>
+              <input type="text" id="smtp-host" />
+            </label>
+            <label>
+              <span>Port</span>
+              <input type="number" id="smtp-port" min="1" max="65535" />
+            </label>
+            <label>
+              <span>Username</span>
+              <input type="text" id="smtp-username" />
+            </label>
+            <label>
+              <span>Password</span>
+              <input type="password" id="smtp-password" />
+            </label>
+            <label>
+              <span>Use TLS</span>
+              <input type="checkbox" id="smtp-tls" />
+            </label>
+            <label>
+              <span>From Email</span>
+              <input type="email" id="smtp-from" />
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="submit">Save SMTP</button>
+          </div>
+        </form>
+        <div style="margin-top:12px;">
+          <div class="grid">
+            <label>
+              <span>Test Recipient</span>
+              <input type="email" id="smtp-test-to" placeholder="you@example.com" />
+            </label>
+          </div>
+          <div class="form-actions">
+            <button id="smtp-send-test">Send Test Email</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Bulk Password Update</h2>
+        <form id="bulk-pass-form">
+          <div class="grid">
+            <label>
+              <span>New Password for All NVRs</span>
+              <input type="password" id="bulk-password" required />
+            </label>
+            <label style="align-items:center;">
+              <span>Confirm Apply to All</span>
+              <input type="checkbox" id="bulk-confirm" />
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="submit">Update All Passwords</button>
+          </div>
+        </form>
+      </section>
+      <section class="panel">
+        <h2>Sync All NVR Time</h2>
+        <div class="form-actions">
+          <button id="sync-all-time">Sync All To Local PC Time</button>
+        </div>
+      </section>
+    </main>
+    <script>
+      async function loadSettings() {
+        try {
+          const res = await fetch('/api/settings');
+          const s = await res.json();
+          const ri = Number(s.refresh_interval ?? 60);
+          const presets = [1, 10, 60];
+          if (presets.includes(ri)) {
+            document.getElementById('refresh-preset').value = String(ri);
+            document.getElementById('refresh-custom').value = '';
+          } else {
+            document.getElementById('refresh-preset').value = 'custom';
+            document.getElementById('refresh-custom').value = String(ri);
+          }
+          document.getElementById('smtp-host').value = s.smtp_host ?? '';
+          document.getElementById('smtp-port').value = s.smtp_port ?? '';
+          document.getElementById('smtp-username').value = s.smtp_username ?? '';
+          document.getElementById('smtp-password').value = s.smtp_password ?? '';
+          document.getElementById('smtp-tls').checked = Boolean(s.smtp_tls);
+          document.getElementById('smtp-from').value = s.smtp_from ?? '';
+        } catch (e) {
+          alert('Failed to load settings');
+        }
+      }
+
+      document.getElementById('refresh-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const preset = document.getElementById('refresh-preset').value;
+        let interval = 60;
+        if (preset === 'custom') {
+          interval = Number(document.getElementById('refresh-custom').value || 60);
+        } else {
+          interval = Number(preset);
+        }
+        if (!Number.isFinite(interval) || interval < 1) {
+          return alert('Invalid interval');
+        }
+        try {
+          const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh_interval: interval })
+          });
+          if (res.ok) {
+            alert('Refresh interval saved');
+          } else {
+            alert('Failed to save refresh interval');
+          }
+        } catch (err) {
+          alert('Request failed');
+        }
+      });
+
+      document.getElementById('smtp-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const payload = {
+          smtp_host: document.getElementById('smtp-host').value.trim() || null,
+          smtp_port: Number(document.getElementById('smtp-port').value) || null,
+          smtp_username: document.getElementById('smtp-username').value.trim() || null,
+          smtp_password: document.getElementById('smtp-password').value || null,
+          smtp_tls: document.getElementById('smtp-tls').checked,
+          smtp_from: document.getElementById('smtp-from').value.trim() || null,
+        };
+        try {
+          const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          if (res.ok) {
+            alert('SMTP settings saved');
+          } else {
+            alert('Failed to save SMTP settings');
+          }
+        } catch (err) {
+          alert('Request failed');
+        }
+      });
+
+      document.getElementById('smtp-send-test').addEventListener('click', async () => {
+        const to = (document.getElementById('smtp-test-to').value || '').trim();
+        if (!to) return alert('Please enter a test recipient email');
+        try {
+          const res = await fetch('/api/smtp/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ to })
+          });
+          const data = await res.json();
+          if (res.ok && data.status !== 'error') {
+            alert('Test email sent');
+          } else {
+            alert('Send failed: ' + (data.message || 'Unknown error'));
+          }
+        } catch (err) {
+          alert('Request failed');
+        }
+      });
+
+      window.addEventListener('DOMContentLoaded', loadSettings);
+
+      document.getElementById('bulk-pass-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const pass = document.getElementById('bulk-password').value;
+        const ok = document.getElementById('bulk-confirm').checked;
+        if (!ok) return alert('Please confirm apply to all');
+        if (!pass) return alert('Password is required');
+        try {
+          const res = await fetch('/api/nvrs/password-all', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: pass })
+          });
+          if (res.ok) {
+            alert('Updated passwords for all NVRs');
+            document.getElementById('bulk-pass-form').reset();
+          } else {
+            const d = await res.json();
+            alert('Failed: ' + (d.message || 'Unknown error'));
+          }
+        } catch (err) {
+          alert('Request failed');
+        }
+      });
+      document.getElementById('sync-all-time').addEventListener('click', async () => {
+        try {
+          const res = await fetch('/api/nvrs/sync_time_all', { method: 'POST' });
+          const data = await res.json();
+          if (res.ok) {
+            alert('Synced time for available NVRs');
+          } else {
+            alert('Sync all failed: ' + (data.message || 'Unknown error'));
+          }
+        } catch (err) {
+          alert('Request failed');
+        }
+      });
+    </script>
+  </body>
+  </html>

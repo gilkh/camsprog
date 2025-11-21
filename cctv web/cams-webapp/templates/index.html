@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cams WebApp</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Cams WebApp</h1>
+      <div class="actions">
+        <button id="refresh">Refresh Now</button>
+        <a class="link-settings" href="/settings">Settings</a>
+        <a class="link-calendar" href="/calendar" style="margin-left:8px;">Calendar</a>
+        <small id="last-updated" style="color:#cbd5e1;margin-left:8px;">Last updated: -</small>
+      </div>
+    </header>
+    <main>
+      <section class="panel">
+        <h2>Add / Update NVR</h2>
+        <form id="nvr-form">
+          <div class="grid">
+            <label>
+              <span>Name</span>
+              <input type="text" id="name" required />
+            </label>
+            <label>
+              <span>IP</span>
+              <input type="text" id="ip" required />
+            </label>
+            <label>
+              <span>Type</span>
+              <select id="type">
+                <option value="">Unknown</option>
+                <option value="Milesight">Milesight</option>
+                <option value="Milesight Old">Milesight Old</option>
+                <option value="Hikvision">Hikvision</option>
+                <option value="Uniview">Uniview</option>
+              </select>
+            </label>
+            <label>
+              <span>Username</span>
+              <input type="text" id="username" />
+            </label>
+            <label>
+              <span>Password</span>
+              <input type="password" id="password" />
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="submit">Save NVR</button>
+          </div>
+        </form>
+      </section>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>IP</th>
+            <th>Password</th>
+            <th>Status</th>
+            <th>Last Online</th>
+            <th>NVR Time</th>
+            <th>Cameras</th>
+            <th>Recording (expected)</th>
+            <th>Rec Status</th>
+            <th>Type</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="nvr-body"></tbody>
+      </table>
+    </main>
+    <script>
+      let refreshTimer = null;
+      let refreshIntervalSec = 60;
+      let pending = false;
+      let controller = null;
+
+      async function refreshData() {
+        try {
+          if (controller) { try { controller.abort(); } catch (err) {} }
+          controller = new AbortController();
+          pending = true;
+          const res = await fetch('/api/nvrs', { signal: controller.signal });
+          const nvrs = await res.json();
+          const tbody = document.getElementById('nvr-body');
+          tbody.innerHTML = '';
+          for (const nvr of nvrs) {
+            const tr = document.createElement('tr');
+            tr.className = (nvr.status === 'Online') ? 'online' : 'offline';
+            const expected = (nvr.recording_expected ?? null);
+            const camNum = nvr.camera_count;
+            const expectedInt = (expected !== null) ? Number(expected) : null;
+            const camInt = (camNum !== undefined && camNum !== null && camNum !== 'Unknown') ? Number(camNum) : null;
+            const statusText = (expectedInt === null || camInt === null || Number.isNaN(expectedInt) || Number.isNaN(camInt)) ? '-' : (camInt === expectedInt ? 'OK' : 'Warning');
+            tr.innerHTML = `
+              <td>${nvr.name ?? ''}</td>
+              <td>${nvr.ip ?? ''}</td>
+              <td>${nvr.password ?? ''}</td>
+              <td>${nvr.status ?? ''}</td>
+              <td>${nvr.last_online ? new Date(nvr.last_online * 1000).toLocaleString() : '-'}</td>
+              <td>${nvr.nvr_time ?? 'Unknown'}</td>
+              <td>${nvr.camera_count ?? 'Unknown'}</td>
+              <td>${expected !== null ? expected : '-'}</td>
+              <td class="${statusText === 'OK' ? 'badge-ok' : (statusText === 'Warning' ? 'badge-warn' : '')}">${statusText}</td>
+              <td>${nvr.type ?? 'Unknown'}</td>
+              <td>
+                <div class="action-row">
+                  <button class="btn-edit" data-ip="${nvr.ip ?? ''}">Edit</button>
+                  <button class="btn-delete" data-ip="${nvr.ip ?? ''}">Delete</button>
+                  <button class="btn-diagnose" data-ip="${nvr.ip ?? ''}">Diagnose</button>
+                  <button class="btn-sync" data-ip="${nvr.ip ?? ''}">Sync Time</button>
+                  <button class="btn-copy-expected" data-ip="${nvr.ip ?? ''}">Copy Cam→Expected</button>
+                </div>
+              </td>
+            `;
+            tbody.appendChild(tr);
+          }
+          const stamp = new Date().toLocaleTimeString();
+          const lu = document.getElementById('last-updated');
+          if (lu) lu.textContent = 'Last updated: ' + stamp;
+        } catch (e) {
+          // silent fail to avoid noise
+        } finally {
+          pending = false;
+          scheduleNext();
+        }
+      }
+      async function loadRefreshIntervalAndStart() {
+        try {
+          const res = await fetch('/api/settings');
+          const s = await res.json();
+          const ri = Number(s.refresh_interval ?? 60);
+          startAutoRefresh(Math.max(1, ri));
+        } catch (e) {
+          startAutoRefresh(60);
+        }
+      }
+      function startAutoRefresh(sec) {
+        refreshIntervalSec = sec;
+        if (refreshTimer) { clearTimeout(refreshTimer); }
+        scheduleNext();
+      }
+      function scheduleNext() {
+        if (refreshTimer) { clearTimeout(refreshTimer); }
+        refreshTimer = setTimeout(() => { if (!pending) refreshData(); }, refreshIntervalSec * 1000);
+      }
+      document.getElementById('refresh').addEventListener('click', refreshData);
+      // Initial load
+      window.addEventListener('DOMContentLoaded', async () => {
+        await loadRefreshIntervalAndStart();
+        await refreshData();
+      });
+      // If tab gains focus, re-read settings to pick up interval changes
+      window.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+          loadRefreshIntervalAndStart();
+        }
+      });
+
+      document.getElementById('nvr-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const formEl = e.target;
+        const originalIp = formEl.dataset.originalIp || null;
+        const payload = {
+          name: document.getElementById('name').value.trim(),
+          ip: document.getElementById('ip').value.trim(),
+          type: document.getElementById('type').value || null,
+          username: document.getElementById('username').value.trim() || null,
+          password: document.getElementById('password').value || null,
+        };
+        try {
+          const res = await fetch('/api/nvrs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const data = await res.json();
+          if (res.ok && data.status === 'ok') {
+            // If editing and IP changed, delete the original
+            if (originalIp && originalIp !== payload.ip) {
+              await fetch(`/api/nvrs/${encodeURIComponent(originalIp)}`, { method: 'DELETE' });
+            }
+            // Reset editing state and refresh
+            formEl.reset();
+            delete formEl.dataset.originalIp;
+            await refreshData();
+          } else {
+            alert('Save failed: ' + (data.message || 'Unknown error'));
+          }
+        } catch (err) {
+          alert('Request failed');
+        }
+      });
+
+      // Delegate edit/delete button clicks
+      document.addEventListener('click', async (e) => {
+        const editBtn = e.target.closest('.btn-edit');
+        const delBtn = e.target.closest('.btn-delete');
+        const diagBtn = e.target.closest('.btn-diagnose');
+        const syncBtn = e.target.closest('.btn-sync');
+        const copyExpBtn = e.target.closest('.btn-copy-expected');
+        if (editBtn) {
+          const ip = editBtn.dataset.ip;
+          try {
+            const res = await fetch('/api/nvrs');
+            const nvrs = await res.json();
+            const nvr = nvrs.find(x => x.ip === ip);
+            if (!nvr) return alert('NVR not found');
+            document.getElementById('name').value = nvr.name ?? '';
+            document.getElementById('ip').value = nvr.ip ?? '';
+            document.getElementById('type').value = nvr.type ?? '';
+            document.getElementById('username').value = nvr.username ?? '';
+            document.getElementById('password').value = nvr.password ?? '';
+            // mark editing with original ip
+            document.getElementById('nvr-form').dataset.originalIp = ip;
+          } catch (err) {
+            alert('Failed to load NVR for edit');
+          }
+          return;
+        }
+        if (delBtn) {
+          const ip = delBtn.dataset.ip;
+          if (!confirm(`Delete NVR ${ip}?`)) return;
+          try {
+            const res = await fetch(`/api/nvrs/${encodeURIComponent(ip)}`, { method: 'DELETE' });
+            if (res.ok) {
+              await refreshData();
+            } else {
+              const data = await res.json();
+              alert('Delete failed: ' + (data.message || 'Unknown error'));
+            }
+          } catch (err) {
+            alert('Delete request failed');
+          }
+        }
+        if (diagBtn) {
+          const ip = diagBtn.dataset.ip;
+          try {
+            const res = await fetch(`/api/diagnose/${encodeURIComponent(ip)}`);
+            const data = await res.json();
+            showDiagModal(data);
+          } catch (err) {
+            alert('Diagnosis failed');
+          }
+        }
+        if (syncBtn) {
+          const ip = syncBtn.dataset.ip;
+          try {
+            const res = await fetch(`/api/nvrs/${encodeURIComponent(ip)}/sync_time`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok) {
+              await refreshData();
+              alert('Time synced');
+            } else {
+              alert('Sync failed: ' + (data.message || 'Unknown error'));
+            }
+          } catch (err) {
+            alert('Sync request failed');
+          }
+        }
+        if (copyExpBtn) {
+          const ip = copyExpBtn.dataset.ip;
+          try {
+            const res = await fetch(`/api/nvrs/${encodeURIComponent(ip)}/expected_recording/copy_from_cameras`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok) {
+              await refreshData();
+              alert('Expected recording set to current cameras');
+            } else {
+              alert('Copy failed: ' + (data.message || 'Unknown error'));
+            }
+          } catch (err) {
+            alert('Request failed');
+          }
+        }
+      });
+
+      function showDiagModal(data) {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        const modal = document.createElement('div');
+        modal.className = 'modal';
+        const pre = document.createElement('pre');
+        pre.textContent = JSON.stringify(data, null, 2);
+        const close = document.createElement('button');
+        close.textContent = 'Close';
+        close.addEventListener('click', () => { document.body.removeChild(overlay); });
+        modal.appendChild(pre);
+        modal.appendChild(close);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+      }
+    </script>
+    <style>
+      .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; }
+      .modal { background: #fff; border-radius: 10px; padding: 16px; max-width: 800px; width: 90%; box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
+      .modal pre { max-height: 60vh; overflow: auto; background: #f9fafb; padding: 10px; border: 1px solid #e5e7eb; border-radius: 6px; }
+      .modal button { margin-top: 10px; }
+      .action-row { display: flex; gap: 6px; align-items: center; flex-wrap: nowrap; white-space: nowrap; overflow-x: auto; }
+      .badge-ok { color: #065f46; font-weight: 600; }
+      .badge-warn { color: #b45309; font-weight: 600; }
+    </style>
+  </body>
+</html>
