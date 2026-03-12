@@ -63,8 +63,9 @@
             <th>Status</th>
             <th>Last Online</th>
             <th>NVR Time</th>
-            <th>Cameras</th>
-            <th>Recording (expected)</th>
+            <th>Cameras Working</th>
+            <th>Recording</th>
+            <th>Expected</th>
             <th>Rec Status</th>
             <th>Type</th>
             <th>Actions</th>
@@ -92,10 +93,11 @@
             const tr = document.createElement('tr');
             tr.className = (nvr.status === 'Online') ? 'online' : 'offline';
             const expected = (nvr.recording_expected ?? null);
-            const camNum = nvr.camera_count;
+            const recCount = nvr.recording_count;
             const expectedInt = (expected !== null) ? Number(expected) : null;
-            const camInt = (camNum !== undefined && camNum !== null && camNum !== 'Unknown') ? Number(camNum) : null;
-            const statusText = (expectedInt === null || camInt === null || Number.isNaN(expectedInt) || Number.isNaN(camInt)) ? '-' : (camInt === expectedInt ? 'OK' : 'Warning');
+            const recInt = (recCount !== undefined && recCount !== null && recCount !== 'Unknown' && recCount !== 'Offline') ? Number(recCount) : null;
+            const statusText = (expectedInt === null || recInt === null || Number.isNaN(expectedInt) || Number.isNaN(recInt)) ? '-' : (recInt >= expectedInt ? 'OK' : 'Warning');
+            const recDisplay = (recInt !== null && !Number.isNaN(recInt)) ? recInt : (recCount ?? 'Unknown');
             tr.innerHTML = `
               <td>${nvr.name ?? ''}</td>
               <td>${nvr.ip ?? ''}</td>
@@ -104,6 +106,7 @@
               <td>${nvr.last_online ? new Date(nvr.last_online * 1000).toLocaleString() : '-'}</td>
               <td>${nvr.nvr_time ?? 'Unknown'}</td>
               <td>${nvr.camera_count ?? 'Unknown'}</td>
+              <td>${recDisplay}</td>
               <td>${expected !== null ? expected : '-'}</td>
               <td class="${statusText === 'OK' ? 'badge-ok' : (statusText === 'Warning' ? 'badge-warn' : '')}">${statusText}</td>
               <td>${nvr.type ?? 'Unknown'}</td>

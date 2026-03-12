@@ -443,8 +443,20 @@ class MonitorState:
                     if cam_count is not None:
                         nvr["camera_count"] = cam_count
 
-                # Recording status via ipcstatus (best-effort)
-                # recording counting removed
+                # Recording count from ipcstatus (intersect with connected cameras)
+                ipc_url = f"http://{ip}/sdk.cgi?action=get.status.ipcstatus"
+                try:
+                    ir = requests.get(ipc_url, auth=(username, password), timeout=5)
+                    if ir.status_code == 200 and ir.text:
+                        ipc_conn, ipc_rec = self._parse_milesight_ipcstatus_details(ir.text)
+                        if connected_ids is not None and ipc_rec:
+                            nvr["recording_count"] = len(connected_ids & ipc_rec)
+                        elif ipc_conn and ipc_rec:
+                            nvr["recording_count"] = len(ipc_conn & ipc_rec)
+                        elif ipc_rec:
+                            nvr["recording_count"] = len(ipc_rec)
+                except Exception:
+                    pass
 
             elif vendor == "Milesight Old":
                 time_url = f"http://{ip}/sdk.cgi?action=get.system.time"
@@ -457,10 +469,22 @@ class MonitorState:
                 ipc_url = f"http://{ip}/sdk.cgi?action=get.status.ipcstatus"
                 ir = requests.get(ipc_url, auth=(username, password), timeout=6)
                 if ir.status_code == 200 and ir.text:
-                    cc = self._parse_milesight_ipcstatus_channel_count(ir.text)
-                    if cc is not None:
-                        nvr["camera_count"] = cc
-                # If system status did not yield a value, keep Unknown to avoid unreliable guesses
+                    ipc_conn, ipc_rec = self._parse_milesight_ipcstatus_details(ir.text)
+                    if ipc_conn:
+                        nvr["camera_count"] = len(ipc_conn)
+                    else:
+                        cc = self._parse_milesight_ipcstatus_channel_count(ir.text)
+                        if cc is not None:
+                            nvr["camera_count"] = cc
+                    connected = ipc_conn
+                    if not connected:
+                        cam_count = nvr.get("camera_count")
+                        if isinstance(cam_count, int):
+                            connected = set(range(cam_count))
+                    if connected and ipc_rec:
+                        nvr["recording_count"] = len(connected & ipc_rec)
+                    elif ipc_rec:
+                        nvr["recording_count"] = len(ipc_rec)
 
             elif vendor == "Hikvision":
                 # Time (namespace-agnostic)
@@ -499,6 +523,7 @@ class MonitorState:
                     else:
                         nvr["nvr_time"] = f"Time failed: {rs.status_code}"
 
+                # --- Camera count: try inputs/channels, then InputProxy/channels/status, then Streaming ---
                 connected_ids = None
                 ch_url = f"http://{ip}/ISAPI/System/Video/inputs/channels"
                 rc = requests.get(ch_url, auth=HTTPDigestAuth(username, password), timeout=5)
@@ -507,6 +532,22 @@ class MonitorState:
                     if connected_ids:
                         nvr["camera_count"] = len(connected_ids)
                 if not connected_ids:
+                    # Fallback: InputProxy/channels/status (many Hikvision NVRs use this)
+                    proxy_url = f"http://{ip}/ISAPI/ContentMgmt/InputProxy/channels/status"
+                    ps = requests.get(proxy_url, auth=HTTPDigestAuth(username, password), timeout=5)
+                    if ps.status_code == 200 and ps.text:
+                        connected_ids = self._parse_hikvision_inputproxy_channels_status_connected_ids(ps.text)
+                        if connected_ids:
+                            # IDs from InputProxy are string IDs like '1','2'; convert to int set
+                            int_ids = set()
+                            for cid in connected_ids:
+                                try:
+                                    int_ids.add(int(cid))
+                                except Exception:
+                                    pass
+                            connected_ids = int_ids if int_ids else connected_ids
+                            nvr["camera_count"] = len(connected_ids)
+                if not connected_ids:
                     stream_url = f"http://{ip}/ISAPI/Streaming/channels"
                     sc = requests.get(stream_url, auth=HTTPDigestAuth(username, password), timeout=5)
                     if sc.status_code == 200 and sc.text:
@@ -514,11 +555,15 @@ class MonitorState:
                         if count is not None:
                             nvr["camera_count"] = count
 
+                # --- Recording config: check DefaultRecordingMode per track ---
                 tracks_url = f"http://{ip}/ISAPI/ContentMgmt/record/tracks"
                 tr = requests.get(tracks_url, auth=HTTPDigestAuth(username, password), timeout=5)
                 if tr.status_code == 200 and tr.text:
-                    enabled_channels = self._parse_hikvision_record_tracks_enabled_channels(tr.text)
-                    # recording counting removed
+                    rec_configured = self._parse_hikvision_record_tracks_configured_channels(tr.text)
+                    if connected_ids and rec_configured:
+                        nvr["recording_count"] = len(connected_ids & rec_configured)
+                    elif rec_configured:
+                        nvr["recording_count"] = len(rec_configured)
             elif vendor == "Uniview":
                 time_url = f"http://{ip}/ISAPI/System/time"
                 r = requests.get(time_url, auth=HTTPDigestAuth(username, password), timeout=6)
@@ -730,7 +775,94 @@ class MonitorState:
         except Exception:
             return None
 
+    def _parse_milesight_ipcstatus_details(self, text: str):
+        """Parse ipcstatus to get connected (with image) and recording channel IDs.
+        Handles formats:
+          record[0]=1                   -> channel 0 recording flag
+          connectStatus[0][0]=1         -> channel 0 main stream connected
+          connection[0][0]=2            -> channel 0 connection type
+          chnid[0]=0                    -> channel index mapping
+          ipc[0].status=online          -> channel 0 status
+        Returns (connected_ids: set[int], recording_ids: set[int]).
+        """
+        try:
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            # Three patterns: key[idx]=val, key[idx][sub]=val, key[idx].attr=val
+            pat_simple = re.compile(r'^([a-zA-Z_]+)\[(\d+)\]=(.*)')
+            pat_double = re.compile(r'^([a-zA-Z_]+)\[(\d+)\]\[(\d+)\](?:\.([a-zA-Z_]+))?=(.*)')
+            pat_dotattr = re.compile(r'^([a-zA-Z_]+)\[(\d+)\]\.([a-zA-Z_]+)=(.*)')
+
+            # Per channel: record flag, connect flag
+            channel_record: dict[int, bool] = {}
+            channel_connected: dict[int, bool] = {}
+            channel_seen: set[int] = set()
+
+            for l in lines:
+                # Try double-bracket first (more specific)
+                m = pat_double.match(l)
+                if m:
+                    prefix = m.group(1).lower()
+                    idx = int(m.group(2))
+                    sub = int(m.group(3))
+                    val = m.group(5).strip().lower()
+                    channel_seen.add(idx)
+                    # connectStatus[idx][0]=1 means main stream connected
+                    if prefix == 'connectstatus' and sub == 0:
+                        channel_connected[idx] = val in ('1', 'true', 'connected', 'on')
+                    continue
+
+                # Try dot-attr: ipc[0].status=online
+                m = pat_dotattr.match(l)
+                if m:
+                    prefix = m.group(1).lower()
+                    idx = int(m.group(2))
+                    attr = m.group(3).lower()
+                    val = m.group(4).strip().lower()
+                    channel_seen.add(idx)
+                    if attr in ('status', 'online', 'connectstatus') and 'record' not in attr:
+                        channel_connected[idx] = val in ('online', 'connected', 'true', '1', 'on')
+                    if 'record' in attr:
+                        channel_record[idx] = val in ('1', 'true', 'on', 'enabled', 'enable', 'start', 'started', 'recording')
+                    continue
+
+                # Try simple bracket: record[0]=1, chnid[0]=0
+                m = pat_simple.match(l)
+                if m:
+                    prefix = m.group(1).lower()
+                    idx = int(m.group(2))
+                    val = m.group(3).strip().lower()
+                    channel_seen.add(idx)
+                    if prefix == 'record':
+                        channel_record[idx] = val in ('1', 'true', 'on', 'enabled', 'enable', 'start', 'started', 'recording')
+                    elif prefix in ('status', 'online') and 'record' not in prefix:
+                        channel_connected[idx] = val in ('online', 'connected', 'true', '1', 'on')
+                    continue
+
+            connected_ids: set[int] = set()
+            recording_ids: set[int] = set()
+
+            for idx in channel_seen:
+                # Connected: if we have explicit connect info use it; else assume connected
+                if idx in channel_connected:
+                    if channel_connected[idx]:
+                        connected_ids.add(idx)
+                else:
+                    # No explicit connect info for this channel: assume connected if listed
+                    connected_ids.add(idx)
+
+                # Recording: explicit flag
+                if channel_record.get(idx, False):
+                    recording_ids.add(idx)
+
+            return connected_ids, recording_ids
+        except Exception:
+            return set(), set()
+
     def _parse_milesight_ipclist_connected_ids(self, text: str) -> set[int] | None:
+        """Parse Milesight ipclist JSON: return set of channel IDs that are connected.
+        Checks connectState, state, online, status fields.
+        connectState=1 or state=2 means connected on Milesight NVRs.
+        """
         try:
             data = json.loads(text)
             if isinstance(data, dict):
@@ -738,12 +870,18 @@ class MonitorState:
                 if isinstance(lst, list) and lst:
                     ids = set()
                     for i, item in enumerate(lst):
-                        if isinstance(item, dict):
-                            vals = {k.lower(): str(v).strip().lower() for k, v in item.items()}
-                            online = vals.get("online") in {"1", "true", "on", "connected"} or vals.get("status") in {"online", "connected"}
-                            if online:
-                                cid = item.get("id") if isinstance(item.get("id"), int) else i
-                                ids.add(int(cid))
+                        if not isinstance(item, dict):
+                            continue
+                        vals = {k.lower(): str(v).strip().lower() for k, v in item.items()}
+                        online = (
+                            vals.get("online") in {"1", "true", "on", "connected"}
+                            or vals.get("status") in {"online", "connected"}
+                            or vals.get("connectstate") in {"1", "true", "connected"}
+                            or vals.get("state") in {"2"}  # Milesight state=2 means connected
+                        )
+                        if online:
+                            cid = item.get("id") if isinstance(item.get("id"), int) else i
+                            ids.add(int(cid))
                     return ids if ids else None
         except Exception:
             return None
@@ -1011,6 +1149,62 @@ class MonitorState:
                     if chan is not None and is_enabled:
                         enabled.add(chan)
             return enabled if enabled else None
+        except Exception:
+            return None
+
+    def _parse_hikvision_record_tracks_configured_channels(self, xml_text: str) -> set[int] | None:
+        """Parse record/tracks XML and return channels configured to record.
+        A channel is 'configured to record' if its DefaultRecordingMode is a
+        recording mode (CMR=continuous, MR=motion, ER=event, etc.) rather than
+        OFF or empty. Falls back to Enable flag if no DefaultRecordingMode found.
+        Uses SrcChannel (physical channel) when available; falls back to id/100.
+        """
+        try:
+            root = ET.fromstring(xml_text)
+            configured = set()
+            has_mode = False
+            for elem in root.iter():
+                tag = elem.tag
+                if not (isinstance(tag, str) and tag.endswith('Track')):
+                    continue
+                chan = None
+                track_id = None
+                rec_mode = None
+                enable_flag = None
+                for child in elem:
+                    ct = child.tag
+                    if not isinstance(ct, str):
+                        continue
+                    tx = (child.text or '').strip()
+                    lct = ct.lower()
+                    if lct.endswith('srcchannel'):
+                        try:
+                            chan = int(tx)
+                        except Exception:
+                            pass
+                    elif lct.endswith('id') and not lct.endswith('guid'):
+                        try:
+                            track_id = int(tx)
+                        except Exception:
+                            pass
+                    elif lct.endswith('defaultrecordingmode'):
+                        rec_mode = tx.upper()
+                        has_mode = True
+                    elif lct == 'enable' or lct.endswith('trackenable'):
+                        enable_flag = tx.lower() in ('true', '1')
+                # Determine physical channel
+                if chan is None and track_id is not None:
+                    chan = track_id // 100 if track_id >= 100 else track_id
+                if chan is None:
+                    continue
+                # Determine if configured to record
+                if rec_mode is not None:
+                    # CMR=continuous, MR=motion, ER=event, AR=alarm — all are recording modes
+                    if rec_mode and rec_mode not in ('OFF', 'NONE', ''):
+                        configured.add(chan)
+                elif enable_flag:
+                    configured.add(chan)
+            return configured if configured else None
         except Exception:
             return None
 
