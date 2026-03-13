@@ -94,6 +94,7 @@ class MonitorState:
             nvr.setdefault("camera_count", "Unknown")
             nvr.setdefault("recording_count", "Unknown")
             nvr.setdefault("recording_expected", None)
+            nvr.setdefault("channel_statuses", [])
 
     def get_snapshot(self) -> List[Dict[str, Any]]:
         with self.lock:
@@ -155,6 +156,7 @@ class MonitorState:
                     nvr["nvr_time"] = "Offline"
                     nvr["camera_count"] = "Offline"
                     nvr["recording_count"] = "Offline"
+                    nvr["channel_statuses"] = []
         # Persist fast to separate state file (avoid rewriting config.json each refresh)
         self._write_state()
 
@@ -353,6 +355,7 @@ class MonitorState:
                 "type": nvr_type,
                 "username": data.get("username") or "",
                 "password": data.get("password") or "",
+                "recording_expected": data.get("recording_expected"),
                 "status": "Unknown",
                 "last_online": None,
                 "offline_since": None,
@@ -400,6 +403,7 @@ class MonitorState:
         if not ip:
             return
         try:
+            nvr["channel_statuses"] = []
             if vendor == "Milesight":
                 # Time (robust: JSON or key=value formats)
                 time_url = f"http://{ip}/sdk.cgi?action=get.system.time"
@@ -412,6 +416,8 @@ class MonitorState:
 
                 # Cameras (prefer ipclist JSON) and build connected set
                 connected_ids: set[int] | None = None
+                recording_ids: set[int] = set()
+                motion_ids: set[int] = set()
                 ipclist_url = f"http://{ip}/sdk.cgi?action=get.camera.ipclist&format=json"
                 rc = requests.get(ipclist_url, auth=(username, password), timeout=5)
                 if rc.status_code == 200 and rc.text:
@@ -423,17 +429,13 @@ class MonitorState:
                         cnt = self._parse_milesight_camera_ipclist_connected_count(rc.text)
                         if cnt is not None:
                             nvr["camera_count"] = cnt
-                else:
-                    # Fallback to legacy camera list parsing
-                    cam_url = f"http://{ip}/sdk.cgi?action=get.camera.list"
-                    rcl = requests.get(cam_url, auth=(username, password), timeout=5)
-                    if rcl.status_code == 200 and rcl.text:
-                        cam_count, rec_cfg_count = self._parse_milesight_camera_list(rcl.text)
-                        if cam_count is not None:
-                            nvr["camera_count"] = cam_count
-                        # derive configured-to-record indices and intersect with connected
-                        cfg_indices = self._parse_milesight_record_config_indices(rcl.text)
-                        # recording counting removed
+                cam_url = f"http://{ip}/sdk.cgi?action=get.camera.list"
+                rcl = requests.get(cam_url, auth=(username, password), timeout=5)
+                if rcl.status_code == 200 and rcl.text:
+                    cam_count, rec_cfg_count = self._parse_milesight_camera_list(rcl.text)
+                    if cam_count is not None and nvr.get("camera_count") in (None, "Unknown"):
+                        nvr["camera_count"] = cam_count
+                    motion_ids = self._parse_milesight_motion_config_indices(rcl.text) or set()
 
                 # Fallback to system status for camera count (multiple patterns)
                 ss_url = f"http://{ip}/sdk.cgi?action=get.system.status"
@@ -449,12 +451,20 @@ class MonitorState:
                     ir = requests.get(ipc_url, auth=(username, password), timeout=5)
                     if ir.status_code == 200 and ir.text:
                         ipc_conn, ipc_rec = self._parse_milesight_ipcstatus_details(ir.text)
+                        recording_ids = ipc_rec or set()
                         if connected_ids is not None and ipc_rec:
                             nvr["recording_count"] = len(connected_ids & ipc_rec)
                         elif ipc_conn and ipc_rec:
                             nvr["recording_count"] = len(ipc_conn & ipc_rec)
                         elif ipc_rec:
                             nvr["recording_count"] = len(ipc_rec)
+                        channel_total = self._coerce_channel_total(nvr.get("camera_count"), connected_ids, ipc_conn, ipc_rec, motion_ids)
+                        nvr["channel_statuses"] = self._build_channel_statuses(
+                            channel_total,
+                            recording_ids=recording_ids,
+                            motion_ids=motion_ids,
+                            zero_based=True,
+                        )
                 except Exception:
                     pass
 
@@ -466,6 +476,14 @@ class MonitorState:
                     nvr["nvr_time"] = time_str or "Unknown"
                 else:
                     nvr["nvr_time"] = f"Time failed: {r.status_code}"
+                motion_ids: set[int] = set()
+                cam_url = f"http://{ip}/sdk.cgi?action=get.camera.list"
+                try:
+                    rcl = requests.get(cam_url, auth=(username, password), timeout=6)
+                    if rcl.status_code == 200 and rcl.text:
+                        motion_ids = self._parse_milesight_motion_config_indices(rcl.text) or set()
+                except Exception:
+                    pass
                 ipc_url = f"http://{ip}/sdk.cgi?action=get.status.ipcstatus"
                 ir = requests.get(ipc_url, auth=(username, password), timeout=6)
                 if ir.status_code == 200 and ir.text:
@@ -485,6 +503,13 @@ class MonitorState:
                         nvr["recording_count"] = len(connected & ipc_rec)
                     elif ipc_rec:
                         nvr["recording_count"] = len(ipc_rec)
+                    channel_total = self._coerce_channel_total(nvr.get("camera_count"), connected, ipc_conn, ipc_rec, motion_ids)
+                    nvr["channel_statuses"] = self._build_channel_statuses(
+                        channel_total,
+                        recording_ids=ipc_rec,
+                        motion_ids=motion_ids,
+                        zero_based=True,
+                    )
 
             elif vendor == "Hikvision":
                 # Time (namespace-agnostic)
@@ -559,11 +584,14 @@ class MonitorState:
                 tracks_url = f"http://{ip}/ISAPI/ContentMgmt/record/tracks"
                 tr = requests.get(tracks_url, auth=HTTPDigestAuth(username, password), timeout=5)
                 if tr.status_code == 200 and tr.text:
+                    channel_modes = self._parse_hikvision_record_tracks_channel_modes(tr.text)
                     rec_configured = self._parse_hikvision_record_tracks_configured_channels(tr.text)
                     if connected_ids and rec_configured:
                         nvr["recording_count"] = len(connected_ids & rec_configured)
                     elif rec_configured:
                         nvr["recording_count"] = len(rec_configured)
+                    channel_total = self._coerce_channel_total(nvr.get("camera_count"), connected_ids, rec_configured, set(channel_modes.keys()))
+                    nvr["channel_statuses"] = self._build_channel_statuses_from_modes(channel_total, channel_modes)
             elif vendor == "Uniview":
                 time_url = f"http://{ip}/ISAPI/System/time"
                 r = requests.get(time_url, auth=HTTPDigestAuth(username, password), timeout=6)
@@ -634,6 +662,53 @@ class MonitorState:
         except Exception:
             # Keep refresh robust; do not crash loop
             pass
+
+    def _coerce_channel_total(self, channel_count: Any, *channel_sets: Any) -> int | None:
+        try:
+            if isinstance(channel_count, str) and channel_count.isdigit():
+                return int(channel_count)
+            if isinstance(channel_count, int) and channel_count > 0:
+                return channel_count
+        except Exception:
+            pass
+        max_channel = -1
+        for values in channel_sets:
+            if not values:
+                continue
+            try:
+                current_max = max(int(value) for value in values)
+            except Exception:
+                continue
+            if current_max > max_channel:
+                max_channel = current_max
+        return (max_channel + 1) if max_channel >= 0 else None
+
+    def _build_channel_statuses(self, channel_total: int | None, recording_ids: set[int] | None = None, motion_ids: set[int] | None = None, zero_based: bool = False) -> list[dict[str, Any]]:
+        if channel_total is None or channel_total <= 0:
+            return []
+        recording_ids = recording_ids or set()
+        motion_ids = motion_ids or set()
+        out: list[dict[str, Any]] = []
+        for display_channel in range(1, channel_total + 1):
+            channel_id = display_channel - 1 if zero_based else display_channel
+            if channel_id in motion_ids and channel_id in recording_ids:
+                status = "motion"
+            elif channel_id in recording_ids:
+                status = "recording"
+            else:
+                status = "not-recording"
+            out.append({"channel": display_channel, "status": status})
+        return out
+
+    def _build_channel_statuses_from_modes(self, channel_total: int | None, channel_modes: dict[int, str] | None) -> list[dict[str, Any]]:
+        if channel_total is None or channel_total <= 0:
+            return []
+        channel_modes = channel_modes or {}
+        out: list[dict[str, Any]] = []
+        for display_channel in range(1, channel_total + 1):
+            mode = channel_modes.get(display_channel, "not-recording")
+            out.append({"channel": display_channel, "status": mode})
+        return out
 
     def _parse_milesight_camera_list(self, text: str):
         """Return (camera_count, recording_count) from Milesight camera list. Supports JSON and key=value."""
@@ -966,6 +1041,23 @@ class MonitorState:
         except Exception:
             return None
 
+    def _parse_milesight_motion_config_indices(self, text: str) -> set[int] | None:
+        try:
+            lines = [l.strip().lower() for l in text.splitlines() if l.strip()]
+            motion_indices = set()
+            pat = re.compile(r"([a-zA-Z]+)\[(\d+)\]\.[a-zA-Z_]+=(.+)")
+            for l in lines:
+                m = pat.match(l)
+                if not m:
+                    continue
+                idx = int(m.group(2))
+                val = m.group(3).strip().lower()
+                if ("motion" in l or "md" in l) and val in {"1", "true", "on", "enabled", "enable", "start"}:
+                    motion_indices.add(idx)
+            return motion_indices if motion_indices else None
+        except Exception:
+            return None
+
     def _parse_milesight_system_status_camera_count(self, text: str):
         """Parse camera count from Milesight system status (multiple patterns)."""
         patterns = [
@@ -1207,6 +1299,55 @@ class MonitorState:
             return configured if configured else None
         except Exception:
             return None
+
+    def _parse_hikvision_record_tracks_channel_modes(self, xml_text: str) -> dict[int, str]:
+        try:
+            root = ET.fromstring(xml_text)
+            channel_modes: dict[int, str] = {}
+            for elem in root.iter():
+                tag = elem.tag
+                if not (isinstance(tag, str) and tag.endswith('Track')):
+                    continue
+                chan = None
+                track_id = None
+                rec_mode = None
+                enable_flag = None
+                for child in elem:
+                    ct = child.tag
+                    if not isinstance(ct, str):
+                        continue
+                    tx = (child.text or '').strip()
+                    lct = ct.lower()
+                    if lct.endswith('srcchannel'):
+                        try:
+                            chan = int(tx)
+                        except Exception:
+                            pass
+                    elif lct.endswith('id') and not lct.endswith('guid'):
+                        try:
+                            track_id = int(tx)
+                        except Exception:
+                            pass
+                    elif lct.endswith('defaultrecordingmode'):
+                        rec_mode = tx.upper()
+                    elif lct == 'enable' or lct.endswith('trackenable'):
+                        enable_flag = tx.lower() in ('true', '1')
+                if chan is None and track_id is not None:
+                    chan = track_id // 100 if track_id >= 100 else track_id
+                if chan is None:
+                    continue
+                status = 'not-recording'
+                if rec_mode is not None:
+                    if rec_mode == 'MR':
+                        status = 'motion'
+                    elif rec_mode and rec_mode not in ('OFF', 'NONE', ''):
+                        status = 'recording'
+                elif enable_flag:
+                    status = 'recording'
+                channel_modes[chan] = status
+            return channel_modes
+        except Exception:
+            return {}
 
     def _parse_hikvision_record_status_unique(self, xml_text: str):
         try:

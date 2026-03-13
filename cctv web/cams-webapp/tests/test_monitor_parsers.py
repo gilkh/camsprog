@@ -144,6 +144,30 @@ class TestHikvisionRecordingConfig(unittest.TestCase):
         rec_configured = {1, 2, 3}
         self.assertEqual(len(connected_ids & rec_configured), 2)  # channels 1,3
 
+    def test_channel_modes(self):
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <TrackList>
+            <Track>
+                <id>101</id>
+                <DefaultRecordingMode>MR</DefaultRecordingMode>
+                <SrcDescriptor><SrcChannel>1</SrcChannel></SrcDescriptor>
+            </Track>
+            <Track>
+                <id>201</id>
+                <DefaultRecordingMode>CMR</DefaultRecordingMode>
+                <SrcDescriptor><SrcChannel>2</SrcChannel></SrcDescriptor>
+            </Track>
+            <Track>
+                <id>301</id>
+                <DefaultRecordingMode>OFF</DefaultRecordingMode>
+                <SrcDescriptor><SrcChannel>3</SrcChannel></SrcDescriptor>
+            </Track>
+        </TrackList>"""
+        modes = self.m._parse_hikvision_record_tracks_channel_modes(xml)
+        self.assertEqual(modes[1], "motion")
+        self.assertEqual(modes[2], "recording")
+        self.assertEqual(modes[3], "not-recording")
+
 
 class TestHikvisionInputProxy(unittest.TestCase):
     def setUp(self):
@@ -202,6 +226,20 @@ class TestMilesightIpclistConnectedIds(unittest.TestCase):
         ]}
         ids = self.m._parse_milesight_ipclist_connected_ids(json.dumps(data))
         self.assertEqual(ids, {0})
+
+
+class TestMilesightMotionConfig(unittest.TestCase):
+    def setUp(self):
+        self.m = MonitorState.__new__(MonitorState)
+
+    def test_motion_config_indices(self):
+        text = (
+            "camera[0].motion=1\n"
+            "camera[1].motion=0\n"
+            "camera[2].md_enable=1\n"
+        )
+        ids = self.m._parse_milesight_motion_config_indices(text)
+        self.assertEqual(ids, {0, 2})
 
 
 if __name__ == "__main__":

@@ -4,53 +4,427 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>NVR Uptime/Downtime Calendar</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <style>
+      :root {
+        --primary: #2563eb;
+        --primary-hover: #1d4ed8;
+        --success: #10b981;
+        --warning: #f59e0b;
+        --danger: #ef4444;
+        --bg: #f1f5f9;
+        --card: #ffffff;
+        --text: #1e293b;
+        --text-muted: #64748b;
+        --border: #e2e8f0;
+        --radius: 12px;
+        --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.05);
+        --shadow-hover: 0 4px 6px rgba(0,0,0,0.1), 0 10px 20px rgba(0,0,0,0.08);
+      }
+      * { box-sizing: border-box; }
+      body {
+        font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.5;
+      }
+      header {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        color: #fff;
+        padding: 16px 24px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      }
+      header h1 {
+        font-size: 22px;
+        margin: 0;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .actions { display: flex; gap: 12px; align-items: center; }
+      .btn-back, .btn-settings {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: #e2e8f0;
+        text-decoration: none;
+        padding: 10px 16px;
+        border: 1px solid #334155;
+        border-radius: var(--radius);
+        transition: all 0.2s;
+        font-weight: 500;
+        font-size: 14px;
+      }
+      .btn-back:hover, .btn-settings:hover { background: #334155; border-color: #475569; }
+
+      main {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+
+      /* Control Panel */
+      .control-panel {
+        background: var(--card);
+        border-radius: var(--radius);
+        padding: 24px;
+        box-shadow: var(--shadow);
+        border: 1px solid var(--border);
+        margin-bottom: 24px;
+      }
+      .control-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 24px;
+        align-items: end;
+      }
+      .control-section h3 {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text);
+        margin: 0 0 12px 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .date-range-display {
+        background: linear-gradient(135deg, #dbeafe 0%, #eff6ff 100%);
+        border: 1.5px solid #93c5fd;
+        border-radius: 10px;
+        padding: 12px 16px;
+        font-size: 15px;
+        font-weight: 500;
+        color: #1e40af;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .quick-presets {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .preset-btn {
+        padding: 8px 14px;
+        border: 1.5px solid var(--border);
+        background: #fff;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+        color: var(--text);
+      }
+      .preset-btn:hover {
+        border-color: var(--primary);
+        color: var(--primary);
+        background: #eff6ff;
+      }
+      .preset-btn.active {
+        background: var(--primary);
+        border-color: var(--primary);
+        color: white;
+      }
+      .date-inputs {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+      .date-input-group {
+        flex: 1;
+      }
+      .date-input-group label {
+        display: block;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--text-muted);
+        margin-bottom: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .date-input-group input {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1.5px solid var(--border);
+        border-radius: 8px;
+        font-size: 14px;
+        font-family: inherit;
+        transition: all 0.2s;
+      }
+      .date-input-group input:focus {
+        outline: none;
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+      }
+      .date-separator {
+        color: var(--text-muted);
+        font-size: 14px;
+        padding-bottom: 8px;
+      }
+      .btn-load {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 10px 20px;
+        background: var(--primary);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+        height: fit-content;
+      }
+      .btn-load:hover { background: var(--primary-hover); }
+
+      /* Filter & Legend */
+      .toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        margin-bottom: 16px;
+        flex-wrap: wrap;
+      }
+      .filter-section {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .filter-section label {
+        font-size: 14px;
+        font-weight: 500;
+        color: var(--text);
+      }
+      .filter-input-wrapper {
+        position: relative;
+        display: flex;
+        align-items: center;
+      }
+      .filter-input-wrapper svg {
+        position: absolute;
+        left: 12px;
+        color: var(--text-muted);
+        pointer-events: none;
+      }
+      .filter-input-wrapper input {
+        padding: 10px 12px 10px 38px;
+        border: 1.5px solid var(--border);
+        border-radius: 8px;
+        font-size: 14px;
+        width: 260px;
+        transition: all 0.2s;
+      }
+      .filter-input-wrapper input:focus {
+        outline: none;
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+      }
+      .legend-box {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        background: var(--card);
+        padding: 12px 16px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        box-shadow: var(--shadow);
+      }
+      .legend-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text);
+      }
+      .legend-scale {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .legend-gradient {
+        width: 120px;
+        height: 12px;
+        border-radius: 6px;
+        background: linear-gradient(to right, rgb(0,180,80), rgb(100,120,80), rgb(200,0,80));
+        border: 1px solid #d1d5db;
+      }
+      .legend-labels {
+        display: flex;
+        justify-content: space-between;
+        width: 120px;
+        font-size: 11px;
+        color: var(--text-muted);
+        margin-top: 2px;
+      }
+
+      /* Calendar */
+      .calendar-scroll { overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+      .calendar-wrapper { display: inline-block; min-width: 100%; background: var(--card); }
+      .calendar-row { display: grid; }
+      .calendar-row.header { background: #f8fafc; font-weight: 600; position: sticky; top: 0; z-index: 10; }
+      .cell { padding: 10px; border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); }
+      .cell.name { background: #f8fafc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: sticky; left: 0; z-index: 5; box-shadow: 1px 0 0 var(--border); font-size: 13px; }
+      .cell.name.active { background: #dbeafe; }
+      .cell.day { min-width: 90px; cursor: pointer; color: var(--text); white-space: nowrap; position: relative; background: #ffffff; font-size: 12px; }
+      .cell.day:hover { box-shadow: inset 0 0 0 2px #94a3b8; }
+      .calendar-row.header .cell.day.active { background: #dbeafe; }
+      .calendar-row:nth-child(odd) .cell.day { background: #f8fafc; }
+      .leg-box { width:20px; height:12px; display:inline-block; border:1px solid #d1d5db; border-radius:2px; }
+
+      @media (max-width: 768px) {
+        .control-grid { grid-template-columns: 1fr; }
+        .toolbar { flex-direction: column; align-items: stretch; }
+        .filter-input-wrapper input { width: 100%; }
+        .legend-box { justify-content: center; }
+        .date-inputs { flex-direction: column; align-items: stretch; }
+        .date-separator { display: none; }
+        main { padding: 16px; }
+        .quick-presets { justify-content: center; }
+        .cell.day { min-width: 70px; }
+      }
+    </style>
   </head>
   <body>
     <header>
-      <h1>NVR Uptime/Downtime</h1>
+      <h1>
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+          <line x1="16" y1="2" x2="16" y2="6"></line>
+          <line x1="8" y1="2" x2="8" y2="6"></line>
+          <line x1="3" y1="10" x2="21" y2="10"></line>
+        </svg>
+        NVR Uptime/Downtime Calendar
+      </h1>
       <div class="actions">
-        <a href="/" class="link-home">Home</a>
-        <a href="/settings" class="link-settings" style="margin-left:8px;">Settings</a>
+        <a href="/" class="btn-back">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+            <polyline points="9 22 9 12 15 12 15 22"></polyline>
+          </svg>
+          Dashboard
+        </a>
+        <a href="/settings" class="btn-settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+            <circle cx="12" cy="12" r="3"></circle>
+          </svg>
+          Settings
+        </a>
       </div>
     </header>
-    <main>
-      <section class="panel">
-        <h2>Calendar</h2>
-        <div class="grid">
-          <label>
-            <span>From</span>
-            <input type="date" id="from-date" />
-          </label>
-          <label>
-            <span>To</span>
-            <input type="date" id="to-date" />
-          </label>
-          <div style="display:flex;align-items:flex-end;gap:8px;">
-            <button id="load-range">Load</button>
-            <small id="range-info" style="color:#6b7280"></small>
-          </div>
-        </div>
-      </section>
 
-      <section>
-        <div class="calendar-toolbar">
-          <label style="display:flex;align-items:center;gap:8px;">
-            <span>Filter NVR</span>
-            <input type="text" id="nvr-filter" placeholder="name or IP" />
-          </label>
-          <div class="legend" title="Color scale shows downtime percentage per day">
-            <span>Legend:</span>
-            <span class="leg-box" style="background: rgb(0,180,80)"></span>
-            <span>0%</span>
-            <span class="leg-box" style="background: rgb(100,120,80)"></span>
-            <span>50%</span>
-            <span class="leg-box" style="background: rgb(200,0,80)"></span>
-            <span>100%</span>
+    <main>
+      <!-- Control Panel -->
+      <div class="control-panel">
+        <div class="control-grid">
+          <!-- Date Range Display -->
+          <div class="control-section">
+            <h3>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
+              </svg>
+              Selected Range
+            </h3>
+            <div class="date-range-display" id="range-info">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink: 0;">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="16" y1="2" x2="16" y2="6"></line>
+                <line x1="8" y1="2" x2="8" y2="6"></line>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+              </svg>
+              <span id="range-text">Loading...</span>
+            </div>
+          </div>
+
+          <!-- Quick Presets -->
+          <div class="control-section">
+            <h3>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
+              </svg>
+              Quick Presets
+            </h3>
+            <div class="quick-presets">
+              <button class="preset-btn active" data-days="7">Last 7 Days</button>
+              <button class="preset-btn" data-days="14">Last 14 Days</button>
+              <button class="preset-btn" data-days="30">Last 30 Days</button>
+              <button class="preset-btn" data-days="90">Last 3 Months</button>
+            </div>
+          </div>
+
+          <!-- Custom Date Range -->
+          <div class="control-section">
+            <h3>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="16" y1="2" x2="16" y2="6"></line>
+                <line x1="8" y1="2" x2="8" y2="6"></line>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+              </svg>
+              Custom Range
+            </h3>
+            <div style="display: flex; gap: 12px; align-items: flex-end;">
+              <div class="date-inputs" style="flex: 1;">
+                <div class="date-input-group">
+                  <label>From Date</label>
+                  <input type="date" id="from-date" />
+                </div>
+                <span class="date-separator">→</span>
+                <div class="date-input-group">
+                  <label>To Date</label>
+                  <input type="date" id="to-date" />
+                </div>
+              </div>
+              <button class="btn-load" id="load-range">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+                  <path d="M3 3v5h5"></path>
+                  <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"></path>
+                  <path d="M16 16h5v5"></path>
+                </svg>
+                Load
+              </button>
+            </div>
           </div>
         </div>
-        <div id="calendar-container" class="calendar-scroll"></div>
-      </section>
+      </div>
+
+      <!-- Filter & Legend Toolbar -->
+      <div class="toolbar">
+        <div class="filter-section">
+          <label>Filter NVRs:</label>
+          <div class="filter-input-wrapper">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            <input type="text" id="nvr-filter" placeholder="Search by name or IP..." />
+          </div>
+        </div>
+        <div class="legend-box" title="Color scale shows downtime percentage per day">
+          <span class="legend-title">Downtime Heatmap</span>
+          <div>
+            <div class="legend-scale">
+              <span style="font-size: 12px; color: #22c55e; font-weight: 500;">0%</span>
+              <div class="legend-gradient"></div>
+              <span style="font-size: 12px; color: #ef4444; font-weight: 500;">100%</span>
+            </div>
+            <div class="legend-labels">
+              <span>Online</span>
+              <span>Offline</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="calendar-container" class="calendar-scroll"></div>
     </main>
     <script>
       function fmtDate(d) {
@@ -73,7 +447,7 @@
       function defaultRange() {
         const to = new Date();
         const from = new Date();
-        from.setDate(from.getDate() - 13);
+        from.setDate(from.getDate() - 6);
         return { from, to };
       }
 
@@ -82,8 +456,17 @@
         const t = document.getElementById('to-date');
         f.value = fmtDate(from);
         t.value = fmtDate(to);
-        const info = document.getElementById('range-info');
-        info.textContent = `Showing ${fmtDate(from)} to ${fmtDate(to)}`;
+        const rangeText = document.getElementById('range-text');
+        const fromStr = from.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+        const toStr = to.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+        rangeText.textContent = `${fromStr} → ${toStr}`;
+      }
+
+      function applyPreset(days) {
+        const to = new Date();
+        const from = new Date();
+        from.setDate(from.getDate() - (days - 1));
+        return { from, to };
       }
 
       async function loadNvrs() {
@@ -250,10 +633,12 @@
       async function init() {
         const { from, to } = defaultRange();
         setRangeInputs(from, to);
-        const nvrs = await loadNvrs();
-        const events = await loadEvents(from, to);
-        const days = buildDays(from, to);
+        let nvrs = await loadNvrs();
+        let events = await loadEvents(from, to);
+        let days = buildDays(from, to);
         renderCalendar(nvrs, events, days);
+
+        // Load button handler
         document.getElementById('load-range').addEventListener('click', async () => {
           const fromInput = document.getElementById('from-date').value;
           const toInput = document.getElementById('to-date').value;
@@ -261,11 +646,27 @@
           const from = new Date(fromInput + 'T00:00:00');
           const to = new Date(toInput + 'T23:59:59');
           setRangeInputs(from, to);
-          const nvrs2 = await loadNvrs();
-          const events2 = await loadEvents(from, to);
-          const days2 = buildDays(from, to);
-          renderCalendar(nvrs2, events2, days2);
+          nvrs = await loadNvrs();
+          events = await loadEvents(from, to);
+          days = buildDays(from, to);
+          renderCalendar(nvrs, events, days);
         });
+
+        // Quick preset handlers
+        document.querySelectorAll('.preset-btn').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            const daysCount = parseInt(btn.dataset.days, 10);
+            const { from, to } = applyPreset(daysCount);
+            setRangeInputs(from, to);
+            nvrs = await loadNvrs();
+            events = await loadEvents(from, to);
+            days = buildDays(from, to);
+            renderCalendar(nvrs, events, days);
+          });
+        });
+
         document.getElementById('nvr-filter').addEventListener('input', () => {
           renderCalendar(nvrs, events, days);
         });
@@ -288,9 +689,6 @@
       .calendar-toolbar { display:flex; align-items:center; justify-content: space-between; margin-bottom:8px; gap:12px; }
       .legend { display:flex; align-items:center; gap:6px; color:#6b7280; }
       .leg-box { width:20px; height:12px; display:inline-block; border:1px solid #d1d5db; border-radius:2px; }
-      @media (max-width: 1000px) {
-        .cell.day { min-width: 70px; }
-      }
     </style>
   </body>
 </html>

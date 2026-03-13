@@ -40,6 +40,7 @@ class NVRInput(BaseModel):
     type: Optional[str] = Field(default=None, description="Milesight, Hikvision, or Uniview")
     username: Optional[str] = None
     password: Optional[str] = None
+    recording_expected: Optional[int] = None
 
 
 @app.on_event("startup")

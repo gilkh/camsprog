@@ -10,6 +10,7 @@
     <header>
       <h1>Cams WebApp</h1>
       <div class="actions">
+        <button id="btn-add-nvr" class="btn-primary">Add NVR</button>
         <button id="refresh">Refresh Now</button>
         <a class="link-settings" href="/settings">Settings</a>
         <a class="link-calendar" href="/calendar" style="margin-left:8px;">Calendar</a>
@@ -17,42 +18,49 @@
       </div>
     </header>
     <main>
-      <section class="panel">
-        <h2>Add / Update NVR</h2>
-        <form id="nvr-form">
-          <div class="grid">
-            <label>
-              <span>Name</span>
-              <input type="text" id="name" required />
-            </label>
-            <label>
-              <span>IP</span>
-              <input type="text" id="ip" required />
-            </label>
-            <label>
-              <span>Type</span>
-              <select id="type">
-                <option value="">Unknown</option>
-                <option value="Milesight">Milesight</option>
-                <option value="Milesight Old">Milesight Old</option>
-                <option value="Hikvision">Hikvision</option>
-                <option value="Uniview">Uniview</option>
-              </select>
-            </label>
-            <label>
-              <span>Username</span>
-              <input type="text" id="username" />
-            </label>
-            <label>
-              <span>Password</span>
-              <input type="password" id="password" />
-            </label>
-          </div>
-          <div class="form-actions">
-            <button type="submit">Save NVR</button>
-          </div>
-        </form>
-      </section>
+      <div id="nvr-modal-overlay" class="modal-overlay" hidden>
+        <div class="modal">
+          <h2 id="nvr-modal-title">Add / Update NVR</h2>
+          <form id="nvr-form">
+            <div class="grid" style="grid-template-columns: 1fr;">
+              <label>
+                <span>Name</span>
+                <input type="text" id="name" required />
+              </label>
+              <label>
+                <span>IP</span>
+                <input type="text" id="ip" required />
+              </label>
+              <label>
+                <span>Type</span>
+                <select id="type">
+                  <option value="">Unknown</option>
+                  <option value="Milesight">Milesight</option>
+                  <option value="Milesight Old">Milesight Old</option>
+                  <option value="Hikvision">Hikvision</option>
+                  <option value="Uniview">Uniview</option>
+                </select>
+              </label>
+              <label>
+                <span>Username</span>
+                <input type="text" id="username" />
+              </label>
+              <label>
+                <span>Password</span>
+                <input type="password" id="password" />
+              </label>
+              <label>
+                <span>Expected Cameras</span>
+                <input type="number" id="recording_expected" placeholder="e.g. 16" />
+              </label>
+            </div>
+            <div class="form-actions" style="display: flex; gap: 8px;">
+              <button type="submit" class="btn-primary">Save NVR</button>
+              <button type="button" id="btn-cancel-nvr" class="btn-secondary">Cancel</button>
+            </div>
+          </form>
+        </div>
+      </div>
 
       <table>
         <thead>
@@ -64,6 +72,7 @@
             <th>Last Online</th>
             <th>NVR Time</th>
             <th>Cameras Working</th>
+            <th>Channels</th>
             <th>Recording</th>
             <th>Expected</th>
             <th>Rec Status</th>
@@ -79,6 +88,17 @@
       let refreshIntervalSec = 60;
       let pending = false;
       let controller = null;
+
+      function renderChannelStatuses(channelStatuses) {
+        if (!Array.isArray(channelStatuses) || channelStatuses.length === 0) {
+          return '-';
+        }
+        return channelStatuses.map((item) => {
+          const status = item.status || 'not-recording';
+          const channel = item.channel ?? '';
+          return `<span class="channel-pill ${status}">${channel}</span>`;
+        }).join(' ');
+      }
 
       async function refreshData() {
         try {
@@ -106,6 +126,7 @@
               <td>${nvr.last_online ? new Date(nvr.last_online * 1000).toLocaleString() : '-'}</td>
               <td>${nvr.nvr_time ?? 'Unknown'}</td>
               <td>${nvr.camera_count ?? 'Unknown'}</td>
+              <td><div class="channel-list">${renderChannelStatuses(nvr.channel_statuses)}</div></td>
               <td>${recDisplay}</td>
               <td>${expected !== null ? expected : '-'}</td>
               <td class="${statusText === 'OK' ? 'badge-ok' : (statusText === 'Warning' ? 'badge-warn' : '')}">${statusText}</td>
@@ -114,9 +135,7 @@
                 <div class="action-row">
                   <button class="btn-edit" data-ip="${nvr.ip ?? ''}">Edit</button>
                   <button class="btn-delete" data-ip="${nvr.ip ?? ''}">Delete</button>
-                  <button class="btn-diagnose" data-ip="${nvr.ip ?? ''}">Diagnose</button>
                   <button class="btn-sync" data-ip="${nvr.ip ?? ''}">Sync Time</button>
-                  <button class="btn-copy-expected" data-ip="${nvr.ip ?? ''}">Copy Cam→Expected</button>
                 </div>
               </td>
             `;
@@ -154,6 +173,7 @@
       document.getElementById('refresh').addEventListener('click', refreshData);
       // Initial load
       window.addEventListener('DOMContentLoaded', async () => {
+        document.getElementById('nvr-modal-overlay').hidden = true;
         await loadRefreshIntervalAndStart();
         await refreshData();
       });
@@ -168,12 +188,14 @@
         e.preventDefault();
         const formEl = e.target;
         const originalIp = formEl.dataset.originalIp || null;
+        let recordingExpectedVal = document.getElementById('recording_expected').value.trim();
         const payload = {
           name: document.getElementById('name').value.trim(),
           ip: document.getElementById('ip').value.trim(),
           type: document.getElementById('type').value || null,
           username: document.getElementById('username').value.trim() || null,
           password: document.getElementById('password').value || null,
+          recording_expected: recordingExpectedVal ? parseInt(recordingExpectedVal, 10) : null
         };
         try {
           const res = await fetch('/api/nvrs', {
@@ -190,6 +212,7 @@
             // Reset editing state and refresh
             formEl.reset();
             delete formEl.dataset.originalIp;
+            closeNvrModal();
             await refreshData();
           } else {
             alert('Save failed: ' + (data.message || 'Unknown error'));
@@ -199,13 +222,45 @@
         }
       });
 
+      // Modal helpers
+      const nvrModal = document.getElementById('nvr-modal-overlay');
+      const btnAddNvr = document.getElementById('btn-add-nvr');
+      const btnCancelNvr = document.getElementById('btn-cancel-nvr');
+
+      function openNvrModal(isEdit = false) {
+        const formEl = document.getElementById('nvr-form');
+        document.getElementById('nvr-modal-title').textContent = isEdit ? 'Update NVR' : 'Add NVR';
+        if (!isEdit) {
+          formEl.reset();
+          delete formEl.dataset.originalIp;
+        }
+        nvrModal.hidden = false;
+      }
+
+      function closeNvrModal() {
+        nvrModal.hidden = true;
+      }
+
+      btnAddNvr.addEventListener('click', () => openNvrModal(false));
+      if (btnCancelNvr) {
+        btnCancelNvr.addEventListener('click', closeNvrModal);
+      }
+      if (nvrModal) {
+        nvrModal.addEventListener('click', (e) => {
+          if (e.target === nvrModal) closeNvrModal();
+        });
+      }
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !nvrModal.hidden) {
+          closeNvrModal();
+        }
+      });
+
       // Delegate edit/delete button clicks
       document.addEventListener('click', async (e) => {
         const editBtn = e.target.closest('.btn-edit');
         const delBtn = e.target.closest('.btn-delete');
-        const diagBtn = e.target.closest('.btn-diagnose');
         const syncBtn = e.target.closest('.btn-sync');
-        const copyExpBtn = e.target.closest('.btn-copy-expected');
         if (editBtn) {
           const ip = editBtn.dataset.ip;
           try {
@@ -218,8 +273,10 @@
             document.getElementById('type').value = nvr.type ?? '';
             document.getElementById('username').value = nvr.username ?? '';
             document.getElementById('password').value = nvr.password ?? '';
+            document.getElementById('recording_expected').value = (nvr.recording_expected !== undefined && nvr.recording_expected !== null) ? nvr.recording_expected : '';
             // mark editing with original ip
             document.getElementById('nvr-form').dataset.originalIp = ip;
+            openNvrModal(true);
           } catch (err) {
             alert('Failed to load NVR for edit');
           }
@@ -240,16 +297,6 @@
             alert('Delete request failed');
           }
         }
-        if (diagBtn) {
-          const ip = diagBtn.dataset.ip;
-          try {
-            const res = await fetch(`/api/diagnose/${encodeURIComponent(ip)}`);
-            const data = await res.json();
-            showDiagModal(data);
-          } catch (err) {
-            alert('Diagnosis failed');
-          }
-        }
         if (syncBtn) {
           const ip = syncBtn.dataset.ip;
           try {
@@ -265,38 +312,7 @@
             alert('Sync request failed');
           }
         }
-        if (copyExpBtn) {
-          const ip = copyExpBtn.dataset.ip;
-          try {
-            const res = await fetch(`/api/nvrs/${encodeURIComponent(ip)}/expected_recording/copy_from_cameras`, { method: 'POST' });
-            const data = await res.json();
-            if (res.ok) {
-              await refreshData();
-              alert('Expected recording set to current cameras');
-            } else {
-              alert('Copy failed: ' + (data.message || 'Unknown error'));
-            }
-          } catch (err) {
-            alert('Request failed');
-          }
-        }
       });
-
-      function showDiagModal(data) {
-        const overlay = document.createElement('div');
-        overlay.className = 'modal-overlay';
-        const modal = document.createElement('div');
-        modal.className = 'modal';
-        const pre = document.createElement('pre');
-        pre.textContent = JSON.stringify(data, null, 2);
-        const close = document.createElement('button');
-        close.textContent = 'Close';
-        close.addEventListener('click', () => { document.body.removeChild(overlay); });
-        modal.appendChild(pre);
-        modal.appendChild(close);
-        overlay.appendChild(modal);
-        document.body.appendChild(overlay);
-      }
     </script>
     <style>
       .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; }
