@@ -4,6 +4,7 @@ try:
     _HAS_ORJSON = True
 except Exception:
     _HAS_ORJSON = False
+import hashlib
 import os
 import threading
 import time
@@ -14,6 +15,7 @@ from datetime import datetime
 from typing import Dict, List, Any
 import requests
 from requests.auth import HTTPDigestAuth
+import concurrent.futures
 
 # Use project root config.json (two levels up from cams-webapp/app)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -132,31 +134,65 @@ class MonitorState:
         with self.lock:
             if not self.nvrs:
                 self.load()
-            for nvr in self.nvrs:
-                ip = nvr.get("ip")
-                if not ip:
+            # Copy basic data to avoid holding the lock during network operations
+            # Shallow dict copy is sufficient because we only read/update top-level keys
+            nvrs_to_check = [dict(nvr) for nvr in self.nvrs if nvr.get("ip")]
+
+        def check_nvr(nvr_copy):
+            ip = nvr_copy.get("ip")
+            online = ping_ip(ip)
+            if online:
+                # Get vendor-specific stats
+                # The _update_vendor_stats function uses 'type', 'username', 'password', 'ip'
+                # which are all present in the shallow copy.
+                self._update_vendor_stats(nvr_copy)
+                nvr_copy["_ping_online"] = True
+            else:
+                nvr_copy["_ping_online"] = False
+                nvr_copy["nvr_time"] = "Offline"
+                nvr_copy["camera_count"] = "Offline"
+                nvr_copy["recording_count"] = "Offline"
+                nvr_copy["channel_statuses"] = []
+            return nvr_copy
+
+        updated_nvrs = []
+        if nvrs_to_check:
+            # Maximum 32 concurrent workers to avoid huge bursts
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(nvrs_to_check))) as executor:
+                updated_nvrs = list(executor.map(check_nvr, nvrs_to_check))
+
+        # Re-apply updated stats under the lock
+        with self.lock:
+            nvr_dict = {nvr.get("ip"): nvr for nvr in self.nvrs if nvr.get("ip")}
+            for updated in updated_nvrs:
+                ip = updated.get("ip")
+                target = nvr_dict.get(ip)
+                if not target:
                     continue
-                online = ping_ip(ip)
-                if online:
-                    if nvr.get("status") == "Offline":
+                
+                if updated.get("_ping_online"):
+                    if target.get("status") == "Offline":
                         # Recovery: finalize offline interval
-                        off_start = nvr.get("offline_since")
+                        off_start = target.get("offline_since")
                         if off_start:
                             self._record_offline_interval(ip, off_start, now_ts)
-                        nvr["offline_since"] = None
-                    nvr["status"] = "Online"
-                    nvr["last_online"] = now_ts
-                    # Update vendor-specific stats
-                    self._update_vendor_stats(nvr)
+                        target["offline_since"] = None
+                    target["status"] = "Online"
+                    target["last_online"] = now_ts
+                    
+                    target["nvr_time"] = updated.get("nvr_time")
+                    target["camera_count"] = updated.get("camera_count")
+                    target["recording_count"] = updated.get("recording_count")
+                    target["channel_statuses"] = updated.get("channel_statuses", [])
                 else:
-                    # Mark offline and set offline_since if first time
-                    if nvr.get("status") != "Offline":
-                        nvr["offline_since"] = now_ts
-                    nvr["status"] = "Offline"
-                    nvr["nvr_time"] = "Offline"
-                    nvr["camera_count"] = "Offline"
-                    nvr["recording_count"] = "Offline"
-                    nvr["channel_statuses"] = []
+                    if target.get("status") != "Offline":
+                        target["offline_since"] = now_ts
+                    target["status"] = "Offline"
+                    target["nvr_time"] = "Offline"
+                    target["camera_count"] = "Offline"
+                    target["recording_count"] = "Offline"
+                    target["channel_statuses"] = []
+
         # Persist fast to separate state file (avoid rewriting config.json each refresh)
         self._write_state()
 
@@ -403,14 +439,34 @@ class MonitorState:
         if not ip:
             return
         try:
+            # Reset dynamic stats each poll so partial failures do not keep stale values.
+            nvr["nvr_time"] = "Unknown"
+            nvr["camera_count"] = "Unknown"
+            nvr["recording_count"] = "Unknown"
             nvr["channel_statuses"] = []
+            session = requests.Session()
+            if vendor in ("Hikvision", "Uniview"):
+                session.auth = HTTPDigestAuth(username, password)
+            else:
+                session.auth = (username, password)
+
             if vendor == "Milesight":
+                auth_failed = False
+                web_auth_ok = self._milesight_web_login(session, ip, username, password, timeout=5)
+
+                def milesight_sdk_get(action_query: str, timeout: int = 5):
+                    if web_auth_ok:
+                        return self._milesight_web_get(session, ip, username, password, "/sdk.cgi", f"action={action_query}", timeout=timeout)
+                    return session.get(f"http://{ip}/sdk.cgi?action={action_query}", timeout=timeout)
+
                 # Time (robust: JSON or key=value formats)
-                time_url = f"http://{ip}/sdk.cgi?action=get.system.time"
-                r = requests.get(time_url, auth=(username, password), timeout=5)
+                r = milesight_sdk_get("get.system.time", timeout=5)
                 if r.status_code == 200:
                     time_str = self._parse_milesight_time_response(r.text)
                     nvr["nvr_time"] = time_str or "Unknown"
+                elif r.status_code == 401:
+                    auth_failed = True
+                    nvr["nvr_time"] = "Auth failed"
                 else:
                     nvr["nvr_time"] = f"Time failed: {r.status_code}"
 
@@ -418,8 +474,7 @@ class MonitorState:
                 connected_ids: set[int] | None = None
                 recording_ids: set[int] = set()
                 motion_ids: set[int] = set()
-                ipclist_url = f"http://{ip}/sdk.cgi?action=get.camera.ipclist&format=json"
-                rc = requests.get(ipclist_url, auth=(username, password), timeout=5)
+                rc = milesight_sdk_get("get.camera.ipclist&format=json", timeout=5)
                 if rc.status_code == 200 and rc.text:
                     ids = self._parse_milesight_ipclist_connected_ids(rc.text)
                     if ids is not None:
@@ -429,63 +484,247 @@ class MonitorState:
                         cnt = self._parse_milesight_camera_ipclist_connected_count(rc.text)
                         if cnt is not None:
                             nvr["camera_count"] = cnt
-                cam_url = f"http://{ip}/sdk.cgi?action=get.camera.list"
-                rcl = requests.get(cam_url, auth=(username, password), timeout=5)
+                elif rc.status_code == 401:
+                    auth_failed = True
+
+                # Browser UI path for camera status: /cgi/main/2001
+                if web_auth_ok:
+                    try:
+                        r2001 = self._milesight_web_post_json(session, ip, username, password, "/cgi/main/2001", payload={}, timeout=5)
+                        if r2001.status_code == 200 and r2001.text:
+                            ids2001 = self._parse_milesight_cgi_camera_list_connected_ids(r2001.text)
+                            if ids2001 is not None:
+                                connected_ids = ids2001
+                                nvr["camera_count"] = len(ids2001)
+                    except Exception:
+                        pass
+
+                # Browser UI recording policy path: /cgi/main/6040 per channel
+                if web_auth_ok:
+                    try:
+                        candidate_ids: list[int] = []
+                        if connected_ids:
+                            candidate_ids = sorted(int(x) for x in connected_ids)
+                        else:
+                            cc = nvr.get("camera_count")
+                            if isinstance(cc, int) and cc > 0:
+                                candidate_ids = list(range(cc))
+
+                        if candidate_ids:
+                            policy_motion_ids: set[int] = set()
+                            policy_record_ids: set[int] = set()
+                            for cid in candidate_ids:
+                                r6040 = self._milesight_web_post_json(
+                                    session,
+                                    ip,
+                                    username,
+                                    password,
+                                    "/cgi/main/6040",
+                                    payload=cid,
+                                    timeout=5,
+                                )
+                                if r6040.status_code != 200 or not r6040.text:
+                                    continue
+                                mode = self._parse_milesight_record_schedule_mode(r6040.text)
+                                if mode == "recording":
+                                    policy_record_ids.add(cid)
+                                elif mode == "motion":
+                                    policy_record_ids.add(cid)
+                                    policy_motion_ids.add(cid)
+
+                            if policy_record_ids:
+                                recording_ids = set(policy_record_ids)
+                                motion_ids = set(policy_motion_ids)
+                                nvr["recording_count"] = len(recording_ids)
+                                channel_total = self._coerce_channel_total(nvr.get("camera_count"), candidate_ids, recording_ids, motion_ids)
+                                nvr["channel_statuses"] = self._build_channel_statuses(
+                                    channel_total,
+                                    recording_ids=recording_ids,
+                                    motion_ids=motion_ids,
+                                    connected_ids=(set(int(x) for x in connected_ids) if connected_ids else None),
+                                    zero_based=True,
+                                )
+                    except Exception:
+                        pass
+
+                rcl = milesight_sdk_get("get.camera.list", timeout=5)
+                rec_cfg_ids: set[int] = set()
                 if rcl.status_code == 200 and rcl.text:
                     cam_count, rec_cfg_count = self._parse_milesight_camera_list(rcl.text)
                     if cam_count is not None and nvr.get("camera_count") in (None, "Unknown"):
                         nvr["camera_count"] = cam_count
                     motion_ids = self._parse_milesight_motion_config_indices(rcl.text) or set()
+                    rec_cfg_ids = self._parse_milesight_record_config_indices(rcl.text) or set()
+                elif rcl.status_code == 401:
+                    auth_failed = True
 
                 # Fallback to system status for camera count (multiple patterns)
-                ss_url = f"http://{ip}/sdk.cgi?action=get.system.status"
-                rs = requests.get(ss_url, auth=(username, password), timeout=5)
+                rs = milesight_sdk_get("get.system.status", timeout=5)
                 if rs.status_code == 200 and rs.text:
                     cam_count = self._parse_milesight_system_status_camera_count(rs.text)
                     if cam_count is not None:
                         nvr["camera_count"] = cam_count
+                elif rs.status_code == 401:
+                    auth_failed = True
 
-                # Recording count from ipcstatus (intersect with connected cameras)
-                ipc_url = f"http://{ip}/sdk.cgi?action=get.status.ipcstatus"
+                # Baseline refresh from connected/configured info, even if ipcstatus fails later.
+                curr_conn_ids = connected_ids if connected_ids is not None else set()
+                configured_ids_raw = rec_cfg_ids | motion_ids
+                configured_ids = self._align_channel_id_set(curr_conn_ids, configured_ids_raw)
+                motion_ids = self._align_channel_id_set(curr_conn_ids, motion_ids)
+                if configured_ids:
+                    recording_ids = curr_conn_ids & configured_ids if curr_conn_ids else configured_ids
+                    nvr["recording_count"] = len(recording_ids)
+                    channel_total = self._coerce_channel_total(nvr.get("camera_count"), curr_conn_ids, recording_ids, motion_ids)
+                    nvr["channel_statuses"] = self._build_channel_statuses(
+                        channel_total,
+                        recording_ids=recording_ids,
+                        motion_ids=motion_ids,
+                        connected_ids=(curr_conn_ids if curr_conn_ids else None),
+                        zero_based=True,
+                    )
+
+                # Recording count: Combine connected channels with explicit recording configuration
                 try:
-                    ir = requests.get(ipc_url, auth=(username, password), timeout=5)
+                    ir = milesight_sdk_get("get.status.ipcstatus", timeout=5)
                     if ir.status_code == 200 and ir.text:
                         ipc_conn, ipc_rec = self._parse_milesight_ipcstatus_details(ir.text)
-                        recording_ids = ipc_rec or set()
-                        if connected_ids is not None and ipc_rec:
-                            nvr["recording_count"] = len(connected_ids & ipc_rec)
-                        elif ipc_conn and ipc_rec:
-                            nvr["recording_count"] = len(ipc_conn & ipc_rec)
-                        elif ipc_rec:
-                            nvr["recording_count"] = len(ipc_rec)
-                        channel_total = self._coerce_channel_total(nvr.get("camera_count"), connected_ids, ipc_conn, ipc_rec, motion_ids)
+                        
+                        curr_conn_ids = connected_ids if connected_ids is not None else (ipc_conn if ipc_conn else set())
+                        configured_ids_raw = rec_cfg_ids | motion_ids
+                        configured_ids = self._align_channel_id_set(curr_conn_ids, configured_ids_raw)
+                        motion_ids = self._align_channel_id_set(curr_conn_ids, motion_ids)
+                        
+                        if curr_conn_ids and configured_ids:
+                            recording_ids = curr_conn_ids & configured_ids
+                        elif configured_ids:
+                            recording_ids = configured_ids
+                        else:
+                            if ipc_rec:
+                                recording_ids = curr_conn_ids & ipc_rec if curr_conn_ids else ipc_rec
+                            else:
+                                recording_ids = curr_conn_ids
+                                
+                        nvr["recording_count"] = len(recording_ids)
+
+                        channel_total = self._coerce_channel_total(nvr.get("camera_count"), curr_conn_ids, recording_ids, motion_ids)
                         nvr["channel_statuses"] = self._build_channel_statuses(
                             channel_total,
                             recording_ids=recording_ids,
                             motion_ids=motion_ids,
+                            connected_ids=(curr_conn_ids if curr_conn_ids else None),
                             zero_based=True,
                         )
+                    elif ir.status_code == 401:
+                        auth_failed = True
                 except Exception:
                     pass
 
+                if auth_failed and nvr.get("recording_count") in (None, "Unknown"):
+                    nvr["camera_count"] = "Auth failed"
+                    nvr["recording_count"] = "Auth failed"
+                    nvr["channel_statuses"] = []
+
             elif vendor == "Milesight Old":
-                time_url = f"http://{ip}/sdk.cgi?action=get.system.time"
-                r = requests.get(time_url, auth=(username, password), timeout=6)
+                auth_failed = False
+                web_auth_ok = self._milesight_web_login(session, ip, username, password, timeout=6)
+
+                def milesight_old_sdk_get(action_query: str, timeout: int = 6):
+                    if web_auth_ok:
+                        return self._milesight_web_get(session, ip, username, password, "/sdk.cgi", f"action={action_query}", timeout=timeout)
+                    return session.get(f"http://{ip}/sdk.cgi?action={action_query}", timeout=timeout)
+
+                r = milesight_old_sdk_get("get.system.time", timeout=6)
                 if r.status_code == 200 and r.text:
                     time_str = self._parse_milesight_time_response(r.text)
                     nvr["nvr_time"] = time_str or "Unknown"
+                elif r.status_code == 401:
+                    auth_failed = True
+                    nvr["nvr_time"] = "Auth failed"
                 else:
                     nvr["nvr_time"] = f"Time failed: {r.status_code}"
                 motion_ids: set[int] = set()
-                cam_url = f"http://{ip}/sdk.cgi?action=get.camera.list"
+                rec_cfg_ids: set[int] = set()
+
+                if web_auth_ok:
+                    try:
+                        r2001 = self._milesight_web_post_json(session, ip, username, password, "/cgi/main/2001", payload={}, timeout=6)
+                        if r2001.status_code == 200 and r2001.text:
+                            ids2001 = self._parse_milesight_cgi_camera_list_connected_ids(r2001.text)
+                            if ids2001 is not None:
+                                nvr["camera_count"] = len(ids2001)
+                    except Exception:
+                        pass
+
                 try:
-                    rcl = requests.get(cam_url, auth=(username, password), timeout=6)
+                    rcl = milesight_old_sdk_get("get.camera.list", timeout=6)
                     if rcl.status_code == 200 and rcl.text:
                         motion_ids = self._parse_milesight_motion_config_indices(rcl.text) or set()
+                        rec_cfg_ids = self._parse_milesight_record_config_indices(rcl.text) or set()
+                    elif rcl.status_code == 401:
+                        auth_failed = True
                 except Exception:
                     pass
-                ipc_url = f"http://{ip}/sdk.cgi?action=get.status.ipcstatus"
-                ir = requests.get(ipc_url, auth=(username, password), timeout=6)
+
+                # Prefer policy-mode truth when web schedule endpoint is available.
+                if web_auth_ok:
+                    try:
+                        candidate_ids: list[int] = []
+                        cc = nvr.get("camera_count")
+                        if isinstance(cc, int) and cc > 0:
+                            candidate_ids = list(range(cc))
+
+                        policy_motion_ids: set[int] = set()
+                        policy_record_ids: set[int] = set()
+                        for cid in candidate_ids:
+                            r6040 = self._milesight_web_post_json(
+                                session,
+                                ip,
+                                username,
+                                password,
+                                "/cgi/main/6040",
+                                payload=cid,
+                                timeout=6,
+                            )
+                            if r6040.status_code != 200 or not r6040.text:
+                                continue
+                            mode = self._parse_milesight_record_schedule_mode(r6040.text)
+                            if mode == "recording":
+                                policy_record_ids.add(cid)
+                            elif mode == "motion":
+                                policy_record_ids.add(cid)
+                                policy_motion_ids.add(cid)
+
+                        if policy_record_ids:
+                            recording_ids = set(policy_record_ids)
+                            motion_ids = set(policy_motion_ids)
+                            nvr["recording_count"] = len(recording_ids)
+                            channel_total = self._coerce_channel_total(nvr.get("camera_count"), candidate_ids, recording_ids, motion_ids)
+                            nvr["channel_statuses"] = self._build_channel_statuses(
+                                channel_total,
+                                recording_ids=recording_ids,
+                                motion_ids=motion_ids,
+                                connected_ids=(set(candidate_ids) if candidate_ids else None),
+                                zero_based=True,
+                            )
+                    except Exception:
+                        pass
+
+                # Baseline refresh from configured channels when camera.list is available.
+                configured_ids_raw = rec_cfg_ids | motion_ids
+                if configured_ids_raw:
+                    recording_ids = set(configured_ids_raw)
+                    nvr["recording_count"] = len(recording_ids)
+                    channel_total = self._coerce_channel_total(nvr.get("camera_count"), recording_ids, motion_ids)
+                    nvr["channel_statuses"] = self._build_channel_statuses(
+                        channel_total,
+                        recording_ids=recording_ids,
+                        motion_ids=motion_ids,
+                        connected_ids=None,
+                        zero_based=True,
+                    )
+
+                ir = milesight_old_sdk_get("get.status.ipcstatus", timeout=6)
                 if ir.status_code == 200 and ir.text:
                     ipc_conn, ipc_rec = self._parse_milesight_ipcstatus_details(ir.text)
                     if ipc_conn:
@@ -494,27 +733,48 @@ class MonitorState:
                         cc = self._parse_milesight_ipcstatus_channel_count(ir.text)
                         if cc is not None:
                             nvr["camera_count"] = cc
-                    connected = ipc_conn
-                    if not connected:
+                    curr_conn_ids = ipc_conn if ipc_conn else set()
+                    if not curr_conn_ids:
                         cam_count = nvr.get("camera_count")
                         if isinstance(cam_count, int):
-                            connected = set(range(cam_count))
-                    if connected and ipc_rec:
-                        nvr["recording_count"] = len(connected & ipc_rec)
-                    elif ipc_rec:
-                        nvr["recording_count"] = len(ipc_rec)
-                    channel_total = self._coerce_channel_total(nvr.get("camera_count"), connected, ipc_conn, ipc_rec, motion_ids)
+                            curr_conn_ids = set(range(cam_count))
+
+                    configured_ids_raw = rec_cfg_ids | motion_ids
+                    configured_ids = self._align_channel_id_set(curr_conn_ids, configured_ids_raw)
+                    motion_ids = self._align_channel_id_set(curr_conn_ids, motion_ids)
+                    
+                    if curr_conn_ids and configured_ids:
+                        recording_ids = curr_conn_ids & configured_ids
+                    elif configured_ids:
+                        recording_ids = configured_ids
+                    else:
+                        if ipc_rec:
+                            recording_ids = curr_conn_ids & ipc_rec if curr_conn_ids else ipc_rec
+                        else:
+                            recording_ids = curr_conn_ids
+
+                    nvr["recording_count"] = len(recording_ids)
+                    
+                    channel_total = self._coerce_channel_total(nvr.get("camera_count"), curr_conn_ids, recording_ids, motion_ids)
                     nvr["channel_statuses"] = self._build_channel_statuses(
                         channel_total,
-                        recording_ids=ipc_rec,
+                        recording_ids=recording_ids,
                         motion_ids=motion_ids,
+                        connected_ids=(curr_conn_ids if curr_conn_ids else None),
                         zero_based=True,
                     )
+                elif ir.status_code == 401:
+                    auth_failed = True
+
+                if auth_failed and nvr.get("recording_count") in (None, "Unknown"):
+                    nvr["camera_count"] = "Auth failed"
+                    nvr["recording_count"] = "Auth failed"
+                    nvr["channel_statuses"] = []
 
             elif vendor == "Hikvision":
                 # Time (namespace-agnostic)
                 time_url = f"http://{ip}/ISAPI/System/time"
-                r = requests.get(time_url, auth=HTTPDigestAuth(username, password), timeout=5)
+                r = session.get(time_url, timeout=5)
                 if r.status_code == 200:
                     try:
                         root = ET.fromstring(r.text)
@@ -531,7 +791,7 @@ class MonitorState:
                 else:
                     # Fallback: device status currentDeviceTime
                     status_url = f"http://{ip}/ISAPI/System/status"
-                    rs = requests.get(status_url, auth=HTTPDigestAuth(username, password), timeout=5)
+                    rs = session.get(status_url, timeout=5)
                     if rs.status_code == 200:
                         try:
                             root = ET.fromstring(rs.text)
@@ -551,7 +811,7 @@ class MonitorState:
                 # --- Camera count: try inputs/channels, then InputProxy/channels/status, then Streaming ---
                 connected_ids = None
                 ch_url = f"http://{ip}/ISAPI/System/Video/inputs/channels"
-                rc = requests.get(ch_url, auth=HTTPDigestAuth(username, password), timeout=5)
+                rc = session.get(ch_url, timeout=5)
                 if rc.status_code == 200 and rc.text:
                     connected_ids = self._parse_hikvision_inputs_connected_ids(rc.text)
                     if connected_ids:
@@ -559,7 +819,7 @@ class MonitorState:
                 if not connected_ids:
                     # Fallback: InputProxy/channels/status (many Hikvision NVRs use this)
                     proxy_url = f"http://{ip}/ISAPI/ContentMgmt/InputProxy/channels/status"
-                    ps = requests.get(proxy_url, auth=HTTPDigestAuth(username, password), timeout=5)
+                    ps = session.get(proxy_url, timeout=5)
                     if ps.status_code == 200 and ps.text:
                         connected_ids = self._parse_hikvision_inputproxy_channels_status_connected_ids(ps.text)
                         if connected_ids:
@@ -574,7 +834,7 @@ class MonitorState:
                             nvr["camera_count"] = len(connected_ids)
                 if not connected_ids:
                     stream_url = f"http://{ip}/ISAPI/Streaming/channels"
-                    sc = requests.get(stream_url, auth=HTTPDigestAuth(username, password), timeout=5)
+                    sc = session.get(stream_url, timeout=5)
                     if sc.status_code == 200 and sc.text:
                         count = self._parse_hikvision_streaming_channels_physical_count(sc.text)
                         if count is not None:
@@ -582,19 +842,74 @@ class MonitorState:
 
                 # --- Recording config: check DefaultRecordingMode per track ---
                 tracks_url = f"http://{ip}/ISAPI/ContentMgmt/record/tracks"
-                tr = requests.get(tracks_url, auth=HTTPDigestAuth(username, password), timeout=5)
+                tr = session.get(tracks_url, timeout=5)
                 if tr.status_code == 200 and tr.text:
                     channel_modes = self._parse_hikvision_record_tracks_channel_modes(tr.text)
                     rec_configured = self._parse_hikvision_record_tracks_configured_channels(tr.text)
-                    if connected_ids and rec_configured:
-                        nvr["recording_count"] = len(connected_ids & rec_configured)
-                    elif rec_configured:
-                        nvr["recording_count"] = len(rec_configured)
-                    channel_total = self._coerce_channel_total(nvr.get("camera_count"), connected_ids, rec_configured, set(channel_modes.keys()))
-                    nvr["channel_statuses"] = self._build_channel_statuses_from_modes(channel_total, channel_modes)
+
+                    motion_enabled_channels: set[int] = set()
+                    motion_probe_ok = False
+                    probe_channels = set()
+                    if connected_ids:
+                        probe_channels |= {int(c) for c in connected_ids}
+                    if rec_configured:
+                        probe_channels |= {int(c) for c in rec_configured}
+
+                    for ch in sorted(probe_channels):
+                        md_url = f"http://{ip}/ISAPI/System/Video/inputs/channels/{ch}/motionDetection"
+                        try:
+                            mr = session.get(md_url, timeout=5)
+                        except Exception:
+                            continue
+                        if mr.status_code != 200 or not mr.text:
+                            continue
+                        motion_probe_ok = True
+                        enabled = self._parse_hikvision_motion_detection_enabled(mr.text)
+                        if enabled:
+                            motion_enabled_channels.add(ch)
+
+                    if motion_probe_ok:
+                        merged_record_configured = set(rec_configured or set()) | motion_enabled_channels
+                        if connected_ids and merged_record_configured:
+                            nvr["recording_count"] = len(set(int(c) for c in connected_ids) & merged_record_configured)
+                        elif merged_record_configured:
+                            nvr["recording_count"] = len(merged_record_configured)
+
+                        # Align display with configured policy for connected channels.
+                        # Disconnected channels stay not-recording.
+                        if connected_ids:
+                            conn_set = set(int(c) for c in connected_ids)
+                        else:
+                            conn_set = set(int(c) for c in merged_record_configured)
+                        for ch in conn_set:
+                            if ch in motion_enabled_channels:
+                                channel_modes[ch] = "motion"
+                            elif ch in merged_record_configured:
+                                channel_modes[ch] = "recording"
+                            else:
+                                channel_modes[ch] = "not-recording"
+
+                    else:
+                        if connected_ids and rec_configured:
+                            nvr["recording_count"] = len(connected_ids & rec_configured)
+                        elif rec_configured:
+                            nvr["recording_count"] = len(rec_configured)
+
+                    channel_total = self._coerce_channel_total(
+                        nvr.get("camera_count"),
+                        connected_ids,
+                        rec_configured,
+                        set(channel_modes.keys()),
+                        one_based=True,
+                    )
+                    nvr["channel_statuses"] = self._build_channel_statuses_from_modes(
+                        channel_total,
+                        channel_modes,
+                        connected_ids=(set(int(c) for c in connected_ids) if connected_ids else None),
+                    )
             elif vendor == "Uniview":
                 time_url = f"http://{ip}/ISAPI/System/time"
-                r = requests.get(time_url, auth=HTTPDigestAuth(username, password), timeout=6)
+                r = session.get(time_url, timeout=6)
                 if r.status_code == 200 and r.text:
                     try:
                         root = ET.fromstring(r.text)
@@ -613,7 +928,7 @@ class MonitorState:
                         nvr["nvr_time"] = "Parse error"
                 else:
                     status_url = f"http://{ip}/ISAPI/System/status"
-                    rs = requests.get(status_url, auth=HTTPDigestAuth(username, password), timeout=6)
+                    rs = session.get(status_url, timeout=6)
                     if rs.status_code == 200 and rs.text:
                         try:
                             root = ET.fromstring(rs.text)
@@ -637,7 +952,7 @@ class MonitorState:
                 cam_count_val = None
                 lapi_url = f"http://{ip}/LAPI/V1.0/Channels/System/ChannelDetailInfos"
                 try:
-                    lr = requests.get(lapi_url, auth=HTTPDigestAuth(username, password), timeout=6)
+                    lr = session.get(lapi_url, timeout=6)
                 except Exception:
                     lr = None
                 if lr and lr.status_code == 200 and lr.text:
@@ -647,12 +962,12 @@ class MonitorState:
                 if cam_count_val is None:
                     # Fallback to ISAPI
                     stream_url = f"http://{ip}/ISAPI/Streaming/channels"
-                    sc = requests.get(stream_url, auth=HTTPDigestAuth(username, password), timeout=5)
+                    sc = session.get(stream_url, timeout=5)
                     if sc.status_code == 200 and sc.text:
                         cam_count_val = self._parse_hikvision_streaming_channels_physical_count(sc.text)
                 if cam_count_val is None:
                     ch_url = f"http://{ip}/ISAPI/System/Video/inputs/channels"
-                    rc = requests.get(ch_url, auth=HTTPDigestAuth(username, password), timeout=5)
+                    rc = session.get(ch_url, timeout=5)
                     if rc.status_code == 200 and rc.text:
                         cam_count_val = self._parse_hikvision_channels_count(rc.text)
                 if cam_count_val is not None:
@@ -662,13 +977,17 @@ class MonitorState:
         except Exception:
             # Keep refresh robust; do not crash loop
             pass
+        finally:
+            if 'session' in locals():
+                session.close()
 
-    def _coerce_channel_total(self, channel_count: Any, *channel_sets: Any) -> int | None:
+    def _coerce_channel_total(self, channel_count: Any, *channel_sets: Any, one_based: bool = False) -> int | None:
+        base_total = None
         try:
             if isinstance(channel_count, str) and channel_count.isdigit():
-                return int(channel_count)
+                base_total = int(channel_count)
             if isinstance(channel_count, int) and channel_count > 0:
-                return channel_count
+                base_total = channel_count
         except Exception:
             pass
         max_channel = -1
@@ -681,17 +1000,32 @@ class MonitorState:
                 continue
             if current_max > max_channel:
                 max_channel = current_max
-        return (max_channel + 1) if max_channel >= 0 else None
+        inferred_total = (max_channel if one_based else (max_channel + 1)) if max_channel >= 0 else None
+        if base_total is None:
+            return inferred_total
+        if inferred_total is None:
+            return base_total
+        return max(base_total, inferred_total)
 
-    def _build_channel_statuses(self, channel_total: int | None, recording_ids: set[int] | None = None, motion_ids: set[int] | None = None, zero_based: bool = False) -> list[dict[str, Any]]:
+    def _build_channel_statuses(
+        self,
+        channel_total: int | None,
+        recording_ids: set[int] | None = None,
+        motion_ids: set[int] | None = None,
+        connected_ids: set[int] | None = None,
+        zero_based: bool = False,
+    ) -> list[dict[str, Any]]:
         if channel_total is None or channel_total <= 0:
             return []
         recording_ids = recording_ids or set()
         motion_ids = motion_ids or set()
+        connected_ids = connected_ids or set()
         out: list[dict[str, Any]] = []
         for display_channel in range(1, channel_total + 1):
             channel_id = display_channel - 1 if zero_based else display_channel
-            if channel_id in motion_ids and channel_id in recording_ids:
+            if connected_ids and channel_id not in connected_ids:
+                status = "no-camera"
+            elif channel_id in motion_ids and channel_id in recording_ids:
                 status = "motion"
             elif channel_id in recording_ids:
                 status = "recording"
@@ -700,15 +1034,45 @@ class MonitorState:
             out.append({"channel": display_channel, "status": status})
         return out
 
-    def _build_channel_statuses_from_modes(self, channel_total: int | None, channel_modes: dict[int, str] | None) -> list[dict[str, Any]]:
+    def _build_channel_statuses_from_modes(
+        self,
+        channel_total: int | None,
+        channel_modes: dict[int, str] | None,
+        connected_ids: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
         if channel_total is None or channel_total <= 0:
             return []
         channel_modes = channel_modes or {}
+        connected_ids = connected_ids or set()
         out: list[dict[str, Any]] = []
         for display_channel in range(1, channel_total + 1):
-            mode = channel_modes.get(display_channel, "not-recording")
+            if connected_ids and display_channel not in connected_ids:
+                mode = "no-camera"
+            else:
+                mode = channel_modes.get(display_channel, "not-recording")
             out.append({"channel": display_channel, "status": mode})
         return out
+
+    def _align_channel_id_set(self, connected_ids: set[int] | None, configured_ids: set[int] | None) -> set[int]:
+        """Align configured IDs to connected IDs when vendor responses mix 0/1-based numbering."""
+        if not configured_ids:
+            return set()
+        if not connected_ids:
+            return set(configured_ids)
+
+        candidates = [
+            set(configured_ids),
+            {idx + 1 for idx in configured_ids},
+            {idx - 1 for idx in configured_ids if idx > 0},
+        ]
+        best = candidates[0]
+        best_overlap = len(connected_ids & best)
+        for candidate in candidates[1:]:
+            overlap = len(connected_ids & candidate)
+            if overlap > best_overlap:
+                best = candidate
+                best_overlap = overlap
+        return best
 
     def _parse_milesight_camera_list(self, text: str):
         """Return (camera_count, recording_count) from Milesight camera list. Supports JSON and key=value."""
@@ -962,6 +1326,141 @@ class MonitorState:
             return None
         return None
 
+    def _parse_milesight_cgi_camera_list_connected_ids(self, text: str) -> set[int] | None:
+        """Parse /cgi/main/2001 response ({"IPC": [...]}) and return connected channel IDs."""
+        try:
+            data = json.loads(text)
+            if not isinstance(data, dict):
+                return None
+            ipc_list = data.get("IPC")
+            if not isinstance(ipc_list, list):
+                return None
+            ids: set[int] = set()
+            for i, item in enumerate(ipc_list):
+                if not isinstance(item, dict):
+                    continue
+                vals = {k.lower(): str(v).strip().lower() for k, v in item.items()}
+                enabled = vals.get("enable") in {"1", "true"}
+                connected = vals.get("connectstate") in {"1", "true"} or vals.get("state") in {"2"}
+                if enabled and connected:
+                    cid = item.get("id") if isinstance(item.get("id"), int) else i
+                    ids.add(int(cid))
+            return ids if ids else None
+        except Exception:
+            return None
+
+    def _milesight_md5(self, text: str) -> str:
+        return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+    def _milesight_digest_auth_header(self, username: str, password: str, uri: str, method: str) -> str:
+        realm = "MSHN"
+        nonce = self._milesight_md5(f"time-stamp :{int(time.time() * 1000)}")
+        nc = "00000001"
+        qop = "auth"
+        cnonce = self._milesight_md5(f"cnonce:{int(time.time() * 1000)}")
+        ha1 = self._milesight_md5(f"{username}:{realm}:{password}")
+        ha2 = self._milesight_md5(f"{method}:{uri}")
+        response = self._milesight_md5(f"{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}")
+        return (
+            f'Digest username="{username}", realm="{realm}", nonce="{nonce}", '
+            f'uri="{uri}", response="{response}", qop={qop}, nc={nc}, cnonce={cnonce}'
+        )
+
+    def _milesight_web_login(self, session: requests.Session, ip: str, username: str, password: str, timeout: int = 5) -> bool:
+        """Perform Milesight web login flow used by browser scripts."""
+        try:
+            # Optional pre-check endpoint used by UI; ignore failures/lock hints and attempt login anyway.
+            check_pwd = self._milesight_md5(password)
+            check_url = f"http://{ip}/checkUser?user={username}&password={check_pwd}&type=1"
+            try:
+                session.get(check_url, timeout=timeout)
+            except Exception:
+                pass
+
+            login_uri = "/cgi/main/1000"
+            login_url = f"http://{ip}{login_uri}"
+            headers = {
+                "Authorization": self._milesight_digest_auth_header(username, password, login_uri, "POST"),
+                "Content-Type": "application/json",
+            }
+            payload = {"userName": username, "md5": self._milesight_md5(password)}
+            r = session.post(login_url, headers=headers, json=payload, timeout=timeout)
+            if r.status_code != 200:
+                return False
+            try:
+                data = r.json()
+                if isinstance(data, dict) and int(data.get("type", -1)) == 0:
+                    return True
+            except Exception:
+                pass
+            return False
+        except Exception:
+            return False
+
+    def _milesight_web_get(self, session: requests.Session, ip: str, username: str, password: str, uri: str, query: str = "", timeout: int = 5) -> requests.Response:
+        url = f"http://{ip}{uri}"
+        if query:
+            url = f"{url}?{query}"
+        headers = {"Authorization": self._milesight_digest_auth_header(username, password, uri, "GET")}
+        return session.get(url, headers=headers, timeout=timeout)
+
+    def _milesight_web_post_json(self, session: requests.Session, ip: str, username: str, password: str, uri: str, payload: Any = None, timeout: int = 5) -> requests.Response:
+        headers = {
+            "Authorization": self._milesight_digest_auth_header(username, password, uri, "POST"),
+            "Content-Type": "application/json",
+        }
+        return session.post(f"http://{ip}{uri}", headers=headers, json=({} if payload is None else payload), timeout=timeout)
+
+    def _parse_milesight_record_schedule_mode(self, text: str) -> str | None:
+        """Parse /cgi/main/6040 response and return channel mode: motion/recording/not-recording."""
+        try:
+            data = json.loads(text)
+            if not isinstance(data, dict):
+                return None
+            schedule = data.get("schedule")
+            if not isinstance(schedule, list):
+                return None
+
+            # Milesight action types seen in UI scripts:
+            # 1=TIMING_RECORD, 2=MOTION_RECORD, others >0 are event-based recording.
+            has_timing = False
+            has_event_or_motion = False
+
+            for day in schedule:
+                if not isinstance(day, dict):
+                    continue
+                if int(day.get("wholedayEnable", 0)) == 1:
+                    whole_type = int(day.get("wholedayActionType", 0) or 0)
+                    if whole_type == 1:
+                        has_timing = True
+                    elif whole_type > 0:
+                        has_event_or_motion = True
+                plans = day.get("plans")
+                if isinstance(plans, list):
+                    for plan in plans:
+                        ptype = None
+                        if isinstance(plan, dict):
+                            ptype = int(plan.get("actionType", 0) or 0)
+                        elif isinstance(plan, list) and len(plan) >= 3:
+                            try:
+                                ptype = int(plan[2] or 0)
+                            except Exception:
+                                ptype = 0
+                        if ptype is None:
+                            continue
+                        if ptype == 1:
+                            has_timing = True
+                        elif ptype > 0:
+                            has_event_or_motion = True
+
+            if has_event_or_motion:
+                return "motion"
+            if has_timing:
+                return "recording"
+            return "not-recording"
+        except Exception:
+            return None
+
     def _parse_milesight_ipcstatus_recording_count(self, text: str) -> int | None:
         """Best-effort parse of recording count from ipcstatus text.
         Scans for per-channel 'record' flags in bracketed key/value lines.
@@ -999,11 +1498,30 @@ class MonitorState:
 
     def _parse_milesight_record_config_indices(self, text: str) -> set[int] | None:
         try:
+            try:
+                data = json.loads(text)
+                ids = set()
+                for key in ("cameras", "camera", "channels"):
+                    arr = data.get(key)
+                    if isinstance(arr, list):
+                        for i, item in enumerate(arr):
+                            if not isinstance(item, dict):
+                                continue
+                            vals = {k.lower(): str(v).strip().lower() for k, v in item.items()}
+                            if any(vals.get(k, "") in {"1", "true", "on", "enabled", "enable", "start"} for k in ("record", "recording", "record_enable", "recordenabled", "recordstatus")):
+                                cid = item.get("id") if isinstance(item.get("id"), int) else i
+                                ids.add(int(cid))
+                        if ids:
+                            return ids
+            except Exception:
+                pass
+
             lines = [l.strip() for l in text.splitlines() if l.strip()]
             rec_keys = {"record", "recording", "record_enable", "recordenabled", "recordstatus", "isrecording"}
             true_vals = {"1", "true", "on", "enabled", "enable", "start"}
             pat1 = re.compile(r"^[A-Za-z_]+\[(\d+)\]\.[A-Za-z_]+=(.+)")
             pat2 = re.compile(r"^[A-Za-z_]+\[(\d+)\]\[(\d+)\]\.[A-Za-z_]+=(.+)")
+            pat_simple = re.compile(r"^([A-Za-z_]+)\[(\d+)\]=(.*)")
             indices = set()
             for l in lines:
                 ll = l.lower()
@@ -1019,6 +1537,14 @@ class MonitorState:
                     ch = int(m1.group(1))
                     val = m1.group(2).strip().lower()
                     if any(k in ll for k in rec_keys) and val in true_vals:
+                        indices.add(ch)
+                    continue
+                ms = pat_simple.match(l)
+                if ms:
+                    key = ms.group(1).lower()
+                    ch = int(ms.group(2))
+                    val = ms.group(3).strip().lower()
+                    if any(k in key for k in rec_keys) and val in true_vals:
                         indices.add(ch)
             return indices if indices else None
         except Exception:
@@ -1043,12 +1569,39 @@ class MonitorState:
 
     def _parse_milesight_motion_config_indices(self, text: str) -> set[int] | None:
         try:
+            try:
+                data = json.loads(text)
+                ids = set()
+                for key in ("cameras", "camera", "channels"):
+                    arr = data.get(key)
+                    if isinstance(arr, list):
+                        for i, item in enumerate(arr):
+                            if not isinstance(item, dict):
+                                continue
+                            vals = {k.lower(): str(v).strip().lower() for k, v in item.items()}
+                            if any(vals.get(k, "") in {"1", "true", "on", "enabled", "enable", "start"} for k in ("motion", "md", "motion_enable", "motionenable")):
+                                cid = item.get("id") if isinstance(item.get("id"), int) else i
+                                ids.add(int(cid))
+                        if ids:
+                            return ids
+            except Exception:
+                pass
+
             lines = [l.strip().lower() for l in text.splitlines() if l.strip()]
             motion_indices = set()
             pat = re.compile(r"([a-zA-Z]+)\[(\d+)\]\.[a-zA-Z_]+=(.+)")
+            pat_simple = re.compile(r"^([a-zA-Z_]+)\[(\d+)\]=(.*)")
             for l in lines:
                 m = pat.match(l)
                 if not m:
+                    ms = pat_simple.match(l)
+                    if not ms:
+                        continue
+                    key = ms.group(1).lower()
+                    idx = int(ms.group(2))
+                    val = ms.group(3).strip().lower()
+                    if ("motion" in key or "md" in key) and val in {"1", "true", "on", "enabled", "enable", "start"}:
+                        motion_indices.add(idx)
                     continue
                 idx = int(m.group(2))
                 val = m.group(3).strip().lower()
@@ -1285,8 +1838,8 @@ class MonitorState:
                     elif lct == 'enable' or lct.endswith('trackenable'):
                         enable_flag = tx.lower() in ('true', '1')
                 # Determine physical channel
-                if chan is None and track_id is not None:
-                    chan = track_id // 100 if track_id >= 100 else track_id
+                if chan is None and track_id is not None and track_id >= 100:
+                    chan = track_id // 100
                 if chan is None:
                     continue
                 # Determine if configured to record
@@ -1332,8 +1885,8 @@ class MonitorState:
                         rec_mode = tx.upper()
                     elif lct == 'enable' or lct.endswith('trackenable'):
                         enable_flag = tx.lower() in ('true', '1')
-                if chan is None and track_id is not None:
-                    chan = track_id // 100 if track_id >= 100 else track_id
+                if chan is None and track_id is not None and track_id >= 100:
+                    chan = track_id // 100
                 if chan is None:
                     continue
                 status = 'not-recording'
@@ -1348,6 +1901,24 @@ class MonitorState:
             return channel_modes
         except Exception:
             return {}
+
+    def _parse_hikvision_motion_detection_enabled(self, xml_text: str) -> bool | None:
+        """Parse Hikvision motionDetection endpoint and return whether motion is enabled."""
+        try:
+            root = ET.fromstring(xml_text)
+            for elem in root.iter():
+                tag = elem.tag
+                if not isinstance(tag, str):
+                    continue
+                if tag.lower().endswith("enabled"):
+                    txt = (elem.text or "").strip().lower()
+                    if txt in ("true", "1"):
+                        return True
+                    if txt in ("false", "0"):
+                        return False
+            return None
+        except Exception:
+            return None
 
     def _parse_hikvision_record_status_unique(self, xml_text: str):
         try:

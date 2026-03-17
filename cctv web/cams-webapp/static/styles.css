@@ -33,6 +33,7 @@ td button:hover { background: #f3f4f6; }
 .channel-pill.motion { color: #15803d; }
 .channel-pill.recording { color: #111827; }
 .channel-pill.not-recording { color: #b91c1c; }
+.channel-pill.no-camera { color: #9ca3af !important; }
 /* Status badges */
 .badge-ok { color: #065f46; font-weight: 600; }
 .badge-warn { color: #b45309; font-weight: 600; }

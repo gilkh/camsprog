@@ -96,7 +96,8 @@
         return channelStatuses.map((item) => {
           const status = item.status || 'not-recording';
           const channel = item.channel ?? '';
-          return `<span class="channel-pill ${status}">${channel}</span>`;
+          const forcedStyle = status === 'no-camera' ? ' style="color:#9ca3af"' : '';
+          return `<span class="channel-pill ${status}"${forcedStyle}>${channel}</span>`;
         }).join(' ');
       }
 

@@ -195,6 +195,18 @@ class TestHikvisionInputProxy(unittest.TestCase):
         self.assertIn('3', ids)
 
 
+class TestHikvisionMotionDetection(unittest.TestCase):
+    def setUp(self):
+        self.m = MonitorState.__new__(MonitorState)
+
+    def test_motion_detection_enabled(self):
+        xml = """<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+        <MotionDetection>
+            <enabled>true</enabled>
+        </MotionDetection>"""
+        self.assertTrue(self.m._parse_hikvision_motion_detection_enabled(xml))
+
+
 class TestMilesightIpclistConnectedIds(unittest.TestCase):
     def setUp(self):
         self.m = MonitorState.__new__(MonitorState)
@@ -240,6 +252,26 @@ class TestMilesightMotionConfig(unittest.TestCase):
         )
         ids = self.m._parse_milesight_motion_config_indices(text)
         self.assertEqual(ids, {0, 2})
+
+    def test_motion_config_simple_bracket_format(self):
+        text = (
+            "motion[0]=1\n"
+            "md[1]=0\n"
+            "motion[2]=true\n"
+        )
+        ids = self.m._parse_milesight_motion_config_indices(text)
+        self.assertEqual(ids, {0, 2})
+
+
+class TestMilesightChannelIdAlignment(unittest.TestCase):
+    def setUp(self):
+        self.m = MonitorState.__new__(MonitorState)
+
+    def test_aligns_zero_based_config_to_one_based_connected(self):
+        connected = {1, 2, 3, 4, 5, 6, 7}
+        configured = {0, 1, 2, 3, 4, 5, 6}
+        aligned = self.m._align_channel_id_set(connected, configured)
+        self.assertEqual(aligned, {1, 2, 3, 4, 5, 6, 7})
 
 
 if __name__ == "__main__":
