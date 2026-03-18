@@ -1,5 +1,6 @@
 import os
 import json
+import html
 import threading
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse, Response
@@ -119,9 +120,23 @@ def _get_merged_settings() -> dict:
         db_s = {}
     merged = dict(file_s if isinstance(file_s, dict) else {})
     if isinstance(db_s, dict):
-        merged.update(db_s)
+        # Do not let null DB fields erase valid values loaded from file.
+        for k, v in db_s.items():
+            if k == "_id":
+                continue
+            if v is None and k in merged and merged.get(k) is not None:
+                continue
+            merged[k] = v
     merged.pop("_id", None)
+
+    # Backward compatibility for older config files.
+    if not merged.get("smtp_host") and merged.get("smtp_server"):
+        merged["smtp_host"] = merged.get("smtp_server")
+    if not merged.get("smtp_host_2") and merged.get("smtp_server_2"):
+        merged["smtp_host_2"] = merged.get("smtp_server_2")
+
     merged["smtp_to"] = _normalize_smtp_to(merged.get("smtp_to"))
+    merged["email_enabled"] = _as_bool(merged.get("email_enabled"), default=True)
     return merged
 
 
@@ -132,20 +147,73 @@ def _parse_int(value):
         return None
 
 
-def _get_smtp_targets(settings: dict) -> list[tuple[str, int]]:
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if lowered in {"0", "false", "no", "off", "disabled"}:
+            return False
+    return bool(value)
+
+
+def _get_smtp_targets(settings: dict, mode: str = "auto") -> list[tuple[str, int]]:
     targets = []
     primary_host = (settings.get("smtp_host") or "").strip()
     primary_port = _parse_int(settings.get("smtp_port"))
     secondary_host = (settings.get("smtp_host_2") or "").strip()
     secondary_port = _parse_int(settings.get("smtp_port_2"))
 
-    if primary_host and primary_port:
-        targets.append((primary_host, primary_port))
-    if secondary_host and secondary_port:
-        # Avoid trying the exact same endpoint twice.
-        if (secondary_host, secondary_port) not in targets:
-            targets.append((secondary_host, secondary_port))
+    primary = (primary_host, primary_port) if primary_host and primary_port else None
+    secondary = (secondary_host, secondary_port) if secondary_host and secondary_port else None
+
+    selected_mode = (mode or "auto").strip().lower()
+    if selected_mode == "primary":
+        if primary:
+            targets.append(primary)
+        return targets
+    if selected_mode == "secondary":
+        if secondary:
+            targets.append(secondary)
+        return targets
+
+    if primary:
+        targets.append(primary)
+    if secondary and secondary not in targets:
+        targets.append(secondary)
+
+    # both: attempt both configured targets; auto: ordered failover list.
     return targets
+
+
+def _smtp_probe_target(settings: dict, host: str, port: int) -> tuple[bool, str | None]:
+    try:
+        import smtplib
+
+        username = settings.get("smtp_username") or None
+        password = settings.get("smtp_password") or None
+        use_tls = bool(settings.get("smtp_tls") or False)
+
+        client = smtplib.SMTP(host, port, timeout=8)
+        try:
+            if use_tls:
+                client.starttls()
+            if username and password:
+                client.login(username, password)
+        finally:
+            try:
+                client.quit()
+            except Exception:
+                pass
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 
 def _parse_nvr_time_epoch(value):
@@ -166,6 +234,326 @@ def _parse_nvr_time_epoch(value):
         return int(dt.timestamp())
     except Exception:
         return None
+
+
+def _format_local_datetime(epoch: int | None) -> str:
+        if epoch is None:
+                epoch = int(time.time())
+        try:
+                return datetime.fromtimestamp(int(epoch)).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        except Exception:
+                return str(epoch)
+
+
+def _friendly_alert_type(alert_type: str | None) -> str:
+        mapping = {
+                "nvr_offline": "NVR Offline",
+                "recording_expected_mismatch": "Recording Count Mismatch",
+                "nvr_time_drift": "NVR Time Drift",
+                "channel_not_recording": "Channel Not Recording",
+        }
+        key = (alert_type or "").strip()
+        return mapping.get(key, key.replace("_", " ").title() or "Alert")
+
+
+def _severity_order(severity: str | None) -> int:
+        sev = (severity or "warning").lower()
+        if sev == "critical":
+                return 0
+        if sev == "warning":
+                return 1
+        if sev == "non-critical":
+                return 2
+        return 3
+
+
+def _build_alert_email_content(due_alerts: list[dict], generated_at_ts: int) -> tuple[str, str, str]:
+        total = len(due_alerts)
+        critical_count = sum(1 for a in due_alerts if (a.get("severity") or "").lower() == "critical")
+        warning_count = sum(1 for a in due_alerts if (a.get("severity") or "").lower() == "warning")
+        non_critical_count = sum(1 for a in due_alerts if (a.get("severity") or "").lower() == "non-critical")
+
+        ordered_alerts = sorted(
+                due_alerts,
+                key=lambda d: (
+                        _severity_order(d.get("severity")),
+                        str(d.get("nvr_name") or d.get("nvr_ip") or ""),
+                        str(d.get("channel") or ""),
+                        str(d.get("alert_type") or ""),
+                ),
+        )
+
+        subject = f"Cams Alerts: {total} active"
+
+        text_lines = [
+                f"Cams WebApp Alert Summary ({_format_local_datetime(generated_at_ts)})",
+                "",
+                f"Total active alerts in this email: {total}",
+                f"Critical: {critical_count}",
+                f"Warning: {warning_count}",
+                f"Non-critical: {non_critical_count}",
+                "",
+                "Situation overview:",
+                "The monitoring system detected active conditions that may affect camera health, recording continuity, or time accuracy.",
+                "Please review the incidents below and acknowledge them in the Logs page after verification.",
+                "",
+                "Active incidents:",
+        ]
+
+        row_html = []
+        for idx, a in enumerate(ordered_alerts, start=1):
+                sev = (a.get("severity") or "warning").lower()
+                sev_label = sev.upper()
+                nvr_name = str(a.get("nvr_name") or a.get("nvr_ip") or "Unknown")
+                nvr_ip = str(a.get("nvr_ip") or "-")
+                alert_type = _friendly_alert_type(a.get("alert_type"))
+                channel = a.get("channel")
+                channel_label = str(channel) if channel is not None else "-"
+                message = str(a.get("message") or alert_type)
+
+                text_lines.append(
+                        f"{idx}. [{sev_label}] {nvr_name} ({nvr_ip}) | Type: {alert_type} | Channel: {channel_label} | {message}"
+                )
+
+                sev_bg = "#fef2f2"
+                sev_fg = "#991b1b"
+                sev_border = "#fecaca"
+                if sev == "warning":
+                        sev_bg = "#fff7ed"
+                        sev_fg = "#9a3412"
+                        sev_border = "#fed7aa"
+                elif sev == "non-critical":
+                        sev_bg = "#f1f5f9"
+                        sev_fg = "#334155"
+                        sev_border = "#e2e8f0"
+
+                row_html.append(
+                        """
+                        <tr>
+                            <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle;font-size:13px;color:#334155;text-align:center;">{idx}</td>
+                            <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle;">
+                                <span style="display:inline-block;padding:4px 10px;border-radius:6px;font-weight:600;font-size:11px;letter-spacing:0.02em;background:{sev_bg};color:{sev_fg};border:1px solid {sev_border};">{sev_label}</span>
+                            </td>
+                            <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle;">
+                                <div style="font-size:14px;font-weight:600;color:#0f172a;">{nvr_name}</div>
+                                <div style="color:#64748b;font-size:12px;margin-top:2px;">{nvr_ip}</div>
+                            </td>
+                            <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle;font-size:13px;font-weight:500;color:#0f172a;">{alert_type}</td>
+                            <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle;font-size:13px;color:#475569;text-align:center;">{channel_label}</td>
+                            <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle;font-size:13px;color:#334155;line-height:1.5;">{message}</td>
+                        </tr>
+                        """.format(
+                                idx=idx,
+                                sev_bg=sev_bg,
+                                sev_fg=sev_fg,
+                                sev_border=sev_border,
+                                sev_label=html.escape(sev_label),
+                                nvr_name=html.escape(nvr_name),
+                                nvr_ip=html.escape(nvr_ip),
+                                alert_type=html.escape(alert_type),
+                                channel_label=html.escape(channel_label),
+                                message=html.escape(message),
+                        ).strip()
+                )
+
+        text_lines.extend(
+                [
+                        "",
+                        "Recommended next actions:",
+                        "1) Check NVR reachability and power/network status for offline devices.",
+                        "2) Validate recording schedules, disk state, and channel input health.",
+                        "3) Confirm NVR time synchronization and timezone settings.",
+                        "",
+                        "This message was generated automatically by Cams WebApp.",
+                ]
+        )
+        text_body = "\n".join(text_lines)
+
+        html_body = """
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>{subject}</title>
+    </head>
+    <body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1e293b;">
+        <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="background:#f1f5f9;padding:40px 16px;">
+            <tr>
+                <td align="center">
+                    <table role="presentation" cellpadding="0" cellspacing="0" width="800" style="width:100%;max-width:800px;background:#ffffff;border:1px solid #cbd5e1;border-radius:12px;overflow:hidden;box-shadow:0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);">
+                        <tr>
+                            <td style="padding:32px;background:linear-gradient(135deg,#0f172a,#1e3a8a);color:#ffffff;text-align:center;">
+                                <div style="font-size:13px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#93c5fd;margin-bottom:8px;">Cams WebApp Monitor</div>
+                                <h1 style="margin:0;font-size:28px;font-weight:700;line-height:1.2;letter-spacing:-0.02em;">System Alert Summary</h1>
+                                <p style="margin:12px 0 0;font-size:14px;color:#bfdbfe;">Generated at {generated_at}</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:32px;">
+                                <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#475569;">
+                                    The monitoring system detected conditions requiring attention.
+                                    Please review the list below, resolve the underlying issues, and acknowledge these alerts in the dashboard.
+                                </p>
+                                <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom:32px;">
+                                    <tr>
+                                        <td style="padding:16px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc;text-align:center;">
+                                            <div style="font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">Total Alerts</div>
+                                            <div style="font-size:28px;font-weight:700;color:#0f172a;">{total}</div>
+                                        </td>
+                                        <td style="width:12px;"></td>
+                                        <td style="padding:16px;border:1px solid #fecaca;border-radius:8px;background:#fef2f2;text-align:center;">
+                                            <div style="font-size:12px;font-weight:600;color:#991b1b;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">Critical</div>
+                                            <div style="font-size:28px;font-weight:700;color:#7f1d1d;">{critical_count}</div>
+                                        </td>
+                                        <td style="width:12px;"></td>
+                                        <td style="padding:16px;border:1px solid #fed7aa;border-radius:8px;background:#fff7ed;text-align:center;">
+                                            <div style="font-size:12px;font-weight:600;color:#9a3412;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">Warning</div>
+                                            <div style="font-size:28px;font-weight:700;color:#7c2d12;">{warning_count}</div>
+                                        </td>
+                                        <td style="width:12px;"></td>
+                                        <td style="padding:16px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc;text-align:center;">
+                                            <div style="font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">Non-critical</div>
+                                            <div style="font-size:28px;font-weight:700;color:#334155;">{non_critical_count}</div>
+                                        </td>
+                                    </tr>
+                                </table>
+                                <h2 style="margin:0 0 16px;font-size:18px;font-weight:600;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:12px;">Incident Details</h2>
+                                <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="border:1px solid #e2e8f0;border-radius:8px;border-collapse:separate;border-spacing:0;background:#ffffff;">
+                                    <thead>
+                                        <tr>
+                                            <th align="center" style="padding:14px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;font-size:12px;font-weight:600;text-transform:uppercase;color:#475569;letter-spacing:0.05em;border-top-left-radius:8px;width:30px;">#</th>
+                                            <th align="left" style="padding:14px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;font-size:12px;font-weight:600;text-transform:uppercase;color:#475569;letter-spacing:0.05em;width:80px;">Severity</th>
+                                            <th align="left" style="padding:14px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;font-size:12px;font-weight:600;text-transform:uppercase;color:#475569;letter-spacing:0.05em;">NVR details</th>
+                                            <th align="left" style="padding:14px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;font-size:12px;font-weight:600;text-transform:uppercase;color:#475569;letter-spacing:0.05em;width:120px;">Issue Type</th>
+                                            <th align="center" style="padding:14px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;font-size:12px;font-weight:600;text-transform:uppercase;color:#475569;letter-spacing:0.05em;width:70px;">Channel</th>
+                                            <th align="left" style="padding:14px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;font-size:12px;font-weight:600;text-transform:uppercase;color:#475569;letter-spacing:0.05em;border-top-right-radius:8px;">Description</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {rows}
+                                    </tbody>
+                                </table>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:0 32px 32px;">
+                                <div style="padding:20px;border-left:4px solid #3b82f6;background:#eff6ff;border-radius:0 8px 8px 0;">
+                                    <h3 style="margin:0 0 10px;font-size:15px;color:#1e3a8a;">Recommended Actions</h3>
+                                    <ul style="margin:0;padding:0 0 0 20px;color:#1e3a8a;font-size:14px;line-height:1.6;">
+                                        <li style="margin-bottom:6px;">Check NVR network connectivity, power state, and ping response.</li>
+                                        <li style="margin-bottom:6px;">Verify recording schedules, disk health metrics, and active channel signals.</li>
+                                        <li style="margin-bottom:0;">Confirm NVR clock synchronization (NTP) and appropriate timezone configuration.</li>
+                                    </ul>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:24px 32px;background:#f8fafc;border-top:1px solid #e2e8f0;text-align:center;">
+                                <div style="font-size:13px;color:#64748b;">
+                                    This is an automated notification from <strong>Cams WebApp</strong>.<br>
+                                    Please do not reply directly to this email.
+                                </div>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </body>
+</html>
+        """.format(
+                subject=html.escape(subject),
+                generated_at=html.escape(_format_local_datetime(generated_at_ts)),
+                total=total,
+                critical_count=critical_count,
+                warning_count=warning_count,
+                non_critical_count=non_critical_count,
+                rows="\n".join(row_html),
+        )
+
+        return subject, text_body, html_body
+
+
+def _build_test_email_content(generated_at_ts: int, smtp_mode: str, recipient_count: int) -> tuple[str, str, str]:
+        subject = "Cams WebApp SMTP Test"
+        mode_label = (smtp_mode or "auto").strip().lower()
+        if mode_label not in {"auto", "primary", "secondary", "both"}:
+                mode_label = "auto"
+
+        text_body = "\n".join(
+                [
+                        "Cams WebApp SMTP Test Message",
+                        "",
+                        f"Generated at: {_format_local_datetime(generated_at_ts)}",
+                        f"SMTP mode: {mode_label}",
+                        f"Recipient count: {recipient_count}",
+                        "",
+                        "This is a test notification to confirm that email delivery is working.",
+                        "No production alert is active for this message.",
+                ]
+        )
+
+        html_body = """
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>{subject}</title>
+    </head>
+    <body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1e293b;">
+        <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="background:#f1f5f9;padding:40px 16px;">
+            <tr>
+                <td align="center">
+                    <table role="presentation" cellpadding="0" cellspacing="0" width="600" style="width:100%;max-width:600px;background:#ffffff;border:1px solid #cbd5e1;border-radius:12px;overflow:hidden;box-shadow:0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);">
+                        <tr>
+                            <td style="padding:32px;background:linear-gradient(135deg,#064e3b,#0e7490);color:#ffffff;text-align:center;">
+                                <div style="font-size:13px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#67e8f9;margin-bottom:8px;">Cams WebApp</div>
+                                <h1 style="margin:0;font-size:28px;font-weight:700;line-height:1.2;letter-spacing:-0.02em;">SMTP Test Successful</h1>
+                                <p style="margin:12px 0 0;font-size:14px;color:#a5f3fc;">Generated at {generated_at}</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:32px;">
+                                <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#475569;text-align:center;">
+                                    This is a test notification to confirm your SMTP configuration is working from Cams WebApp.
+                                    No incident is active for this email.
+                                </p>
+                                <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc;border-collapse:collapse;">
+                                    <tr>
+                                        <td style="padding:16px;border-bottom:1px solid #e2e8f0;font-size:14px;color:#64748b;width:40%;">SMTP Mode</td>
+                                        <td style="padding:16px;border-bottom:1px solid #e2e8f0;font-size:14px;font-weight:600;color:#0f172a;text-transform:capitalize;">{smtp_mode}</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding:16px;font-size:14px;color:#64748b;">Recipient Count</td>
+                                        <td style="padding:16px;font-size:14px;font-weight:600;color:#0f172a;">{recipient_count}</td>
+                                    </tr>
+                                </table>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:24px 32px;background:#f8fafc;border-top:1px solid #e2e8f0;text-align:center;">
+                                <div style="font-size:13px;color:#64748b;">
+                                    This is an automated notification from <strong>Cams WebApp</strong>.<br>
+                                    Please do not reply directly to this email.
+                                </div>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </body>
+</html>
+        """.format(
+                subject=html.escape(subject),
+                generated_at=html.escape(_format_local_datetime(generated_at_ts)),
+                smtp_mode=html.escape(mode_label),
+                recipient_count=int(recipient_count),
+        )
+
+        return subject, text_body, html_body
 
 
 def _build_current_alerts(snapshot: list, settings: dict) -> dict:
@@ -213,7 +601,8 @@ def _build_current_alerts(snapshot: list, settings: dict) -> dict:
         nvr_time_epoch = _parse_nvr_time_epoch(nvr.get("nvr_time"))
         if nvr_time_epoch is not None:
             drift = abs(now_ts - nvr_time_epoch)
-            if drift > tolerance_sec:
+            # Only alert if drift is more than 5 minutes (300 seconds)
+            if drift > 300:
                 drift_min = int(round(drift / 60.0))
                 alert_id = f"nvr_time_drift:{ip}"
                 out[alert_id] = {
@@ -251,36 +640,84 @@ def _build_current_alerts(snapshot: list, settings: dict) -> dict:
     return out
 
 
-def _send_alert_email(settings: dict, recipients: list[str], subject: str, body: str):
-    targets = _get_smtp_targets(settings)
+def _send_alert_email(settings: dict, recipients: list[str], subject: str, body: str, mode: str = "auto", html_body: str | None = None):
+    selected_mode = (mode or "auto").strip().lower()
+    targets = _get_smtp_targets(settings, selected_mode)
     username = settings.get("smtp_username") or None
     password = settings.get("smtp_password") or None
+    auth_provided = bool(username and password)
     use_tls = bool(settings.get("smtp_tls") or False)
     from_addr = settings.get("smtp_from") or None
     if not targets or not from_addr or not recipients:
-        return False, "SMTP target(s), from, or recipients missing", None
+        return False, "SMTP target(s), from, or recipients missing", {
+            "mode": selected_mode,
+            "auth_provided": auth_provided,
+            "auth_used": False,
+            "targets": [{"host": h, "port": p} for (h, p) in targets],
+        }
 
     try:
         import smtplib
         from email.message import EmailMessage
 
         errors = []
+        successes = []
+        auth_used = False
         for host, port in targets:
             client = None
             try:
                 client = smtplib.SMTP(host, port, timeout=12)
+                client.ehlo_or_helo_if_needed()
                 if use_tls:
                     client.starttls()
+                    client.ehlo_or_helo_if_needed()
                 if username and password:
                     client.login(username, password)
+                    auth_used = True
+                target_deliveries = []
                 for to_addr in recipients:
                     msg = EmailMessage()
                     msg["Subject"] = subject
                     msg["From"] = from_addr
                     msg["To"] = to_addr
                     msg.set_content(body)
-                    client.send_message(msg)
-                return True, None, {"host": host, "port": port}
+                    if html_body:
+                        msg.add_alternative(html_body, subtype="html")
+                    raw = msg.as_string()
+
+                    mail_code, mail_resp = client.mail(from_addr)
+                    if int(mail_code) != 250:
+                        raise RuntimeError(f"MAIL FROM rejected ({mail_code}): {mail_resp}")
+
+                    rcpt_code, rcpt_resp = client.rcpt(to_addr)
+                    if int(rcpt_code) not in (250, 251):
+                        raise RuntimeError(f"RCPT TO {to_addr} rejected ({rcpt_code}): {rcpt_resp}")
+
+                    data_code, data_resp = client.data(raw)
+                    if int(data_code) != 250:
+                        raise RuntimeError(f"DATA rejected ({data_code}): {data_resp}")
+
+                    target_deliveries.append(
+                        {
+                            "recipient": to_addr,
+                            "mail_code": int(mail_code),
+                            "rcpt_code": int(rcpt_code),
+                            "data_code": int(data_code),
+                            "data_response": str(data_resp.decode("utf-8", errors="replace") if isinstance(data_resp, (bytes, bytearray)) else data_resp),
+                        }
+                    )
+
+                successes.append({"host": host, "port": port, "deliveries": target_deliveries})
+                if selected_mode != "both":
+                    return True, None, {
+                        "mode": selected_mode,
+                        "host": host,
+                        "port": port,
+                        "deliveries": target_deliveries,
+                        "auth_provided": auth_provided,
+                        "auth_used": auth_used,
+                        "targets": [{"host": h, "port": p} for (h, p) in targets],
+                    }
             except Exception as e:
                 errors.append(f"{host}:{port} -> {e}")
             finally:
@@ -289,9 +726,26 @@ def _send_alert_email(settings: dict, recipients: list[str], subject: str, body:
                         client.quit()
                     except Exception:
                         pass
-        return False, " | ".join(errors), None
+        if selected_mode == "both" and successes:
+            return True, None, {
+                "mode": "both",
+                "targets": successes,
+                "auth_provided": auth_provided,
+                "auth_used": auth_used,
+            }
+        return False, " | ".join(errors), {
+            "mode": selected_mode,
+            "targets": [{"host": h, "port": p} for (h, p) in targets],
+            "auth_provided": auth_provided,
+            "auth_used": auth_used,
+        }
     except Exception as e:
-        return False, str(e), None
+        return False, str(e), {
+            "mode": selected_mode,
+            "auth_provided": auth_provided,
+            "auth_used": False,
+            "targets": [{"host": h, "port": p} for (h, p) in targets],
+        }
 
 
 def _process_alert_cycle_once():
@@ -329,6 +783,7 @@ def _process_alert_cycle_once():
                     "acknowledged": False,
                     "acknowledged_at": None,
                     "last_emailed_at": None,
+                    "next_email_due_at": now_ts,
                     "resolved_at": None,
                 })
             elif prev.get("status") != "active":
@@ -337,6 +792,7 @@ def _process_alert_cycle_once():
                     "acknowledged": False,
                     "acknowledged_at": None,
                     "last_emailed_at": None,
+                    "next_email_due_at": now_ts,
                     "resolved_at": None,
                 })
             alerts_col.update_one({"_id": alert_id}, {"$set": base_set}, upsert=True)
@@ -352,6 +808,9 @@ def _process_alert_cycle_once():
                 {"$set": {"status": "resolved", "resolved_at": now_ts}},
             )
 
+        if not _as_bool(settings.get("email_enabled"), default=True):
+            return
+
         recipients = _normalize_smtp_to(settings.get("smtp_to"))
         if not recipients:
             return
@@ -359,7 +818,6 @@ def _process_alert_cycle_once():
         interval = _parse_int(settings.get("alert_email_interval_seconds"))
         if interval is None or interval < 30:
             interval = 1800
-        due_before = now_ts - interval
 
         due_alerts = list(
             alerts_col.find(
@@ -367,9 +825,9 @@ def _process_alert_cycle_once():
                     "status": "active",
                     "acknowledged": {"$ne": True},
                     "$or": [
-                        {"last_emailed_at": {"$exists": False}},
-                        {"last_emailed_at": None},
-                        {"last_emailed_at": {"$lte": due_before}},
+                        {"next_email_due_at": {"$exists": False}},
+                        {"next_email_due_at": None},
+                        {"next_email_due_at": {"$lte": now_ts}},
                     ],
                 },
                 {
@@ -386,21 +844,25 @@ def _process_alert_cycle_once():
         if not due_alerts:
             return
 
-        subject = f"Cams Alerts: {len(due_alerts)} active"
-        lines = ["Active alerts detected:", ""]
-        for d in due_alerts:
-            sev = (d.get("severity") or "warning").upper()
-            n = d.get("nvr_name") or d.get("nvr_ip") or "Unknown"
-            ip = d.get("nvr_ip") or ""
-            msg = d.get("message") or (d.get("alert_type") or "Alert")
-            lines.append(f"- [{sev}] {n} ({ip}) - {msg}")
-        body = "\n".join(lines)
+        subject, text_body, html_body = _build_alert_email_content(due_alerts, now_ts)
 
-        ok, err, smtp_used = _send_alert_email(settings, recipients, subject, body)
+        ok, err, smtp_used = _send_alert_email(
+            settings,
+            recipients,
+            subject,
+            text_body,
+            html_body=html_body,
+        )
         alert_ids = [x.get("_id") for x in due_alerts if x.get("_id")]
         alerts_col.update_many(
             {"_id": {"$in": alert_ids}},
-            {"$set": {"last_emailed_at": now_ts, "last_email_status": "success" if ok else "failed"}},
+            {
+                "$set": {
+                    "last_emailed_at": now_ts,
+                    "next_email_due_at": now_ts + interval,
+                    "last_email_status": "success" if ok else "failed",
+                }
+            },
         )
         email_col.insert_one(
             {
@@ -454,7 +916,6 @@ def startup_event():
         daemon=True,
     )
     app.state.alert_thread.start()
-    _process_alert_cycle_once()
 
 
 @app.on_event("shutdown")
@@ -589,6 +1050,7 @@ def api_get_settings():
         s["refresh_interval"] = int(s.get("refresh_interval") or monitor.poll_interval or 60)
         s["smtp_to"] = _normalize_smtp_to(s.get("smtp_to"))
         s["alert_email_interval_seconds"] = int(s.get("alert_email_interval_seconds") or 1800)
+        s["email_enabled"] = _as_bool(s.get("email_enabled"), default=True)
         return JSONResponse(s)
     except Exception:
         return JSONResponse({
@@ -603,6 +1065,7 @@ def api_get_settings():
             "smtp_from": None,
             "smtp_to": [],
             "alert_email_interval_seconds": 1800,
+            "email_enabled": True,
         })
 
 
@@ -635,7 +1098,9 @@ def api_set_settings(payload: dict):
             except Exception:
                 update["smtp_port_2"] = None
         if "smtp_tls" in payload:
-            update["smtp_tls"] = bool(payload.get("smtp_tls"))
+            update["smtp_tls"] = _as_bool(payload.get("smtp_tls"), default=False)
+        if "email_enabled" in payload:
+            update["email_enabled"] = _as_bool(payload.get("email_enabled"), default=True)
         if "alert_email_interval_seconds" in payload:
             try:
                 v = int(payload.get("alert_email_interval_seconds"))
@@ -648,7 +1113,13 @@ def api_set_settings(payload: dict):
                 app.state.db["settings"].update_one({"_id": "global"}, {"$set": update}, upsert=True)
             except Exception:
                 pass
-            _save_settings_to_file(update)
+            # Keep legacy key names in file for backward compatibility.
+            update_for_file = dict(update)
+            if "smtp_host" in update:
+                update_for_file["smtp_server"] = update.get("smtp_host")
+            if "smtp_host_2" in update:
+                update_for_file["smtp_server_2"] = update.get("smtp_host_2")
+            _save_settings_to_file(update_for_file)
         return {"status": "ok"}
     except Exception:
         return JSONResponse({"status": "error", "message": "Failed to save settings"}, status_code=500)
@@ -1209,6 +1680,92 @@ def api_logs_ack_all(payload: dict):
         return JSONResponse({"status": "error", "message": "Failed to acknowledge alerts"}, status_code=500)
 
 
+@app.post("/api/logs/unack")
+def api_logs_unack(payload: dict):
+    """Unacknowledge an alert by alert_id."""
+    try:
+        alert_id = (payload or {}).get("alert_id")
+        if not alert_id:
+            return JSONResponse({"status": "error", "message": "alert_id is required"}, status_code=400)
+        db = app.state.db
+        found = db["alerts"].find_one({"_id": alert_id, "status": "active"})
+        if not found:
+            return JSONResponse({"status": "error", "message": "Active alert not found"}, status_code=404)
+        db["alerts"].update_one(
+            {"_id": alert_id},
+            {"$set": {"acknowledged": False, "acknowledged_at": None}},
+        )
+        return {"status": "ok"}
+    except Exception:
+        return JSONResponse({"status": "error", "message": "Failed to unacknowledge alert"}, status_code=500)
+
+
+@app.post("/api/logs/email_history/clear")
+def api_logs_email_history_clear(payload: dict):
+    """Clear email history. If email_id provided, clears single entry. Otherwise clears all."""
+    try:
+        email_id = (payload or {}).get("email_id")
+        db = app.state.db
+        if email_id:
+            # Delete single entry by _id (convert to ObjectId if needed)
+            from bson.objectid import ObjectId
+            try:
+                obj_id = ObjectId(email_id) if len(str(email_id)) == 24 else email_id
+            except Exception:
+                obj_id = email_id
+            result = db["email_events"].delete_one({"_id": obj_id})
+            if result.deleted_count == 0:
+                return JSONResponse({"status": "error", "message": "Email entry not found"}, status_code=404)
+            return {"status": "ok", "deleted": 1}
+        else:
+            # Clear all email history
+            result = db["email_events"].delete_many({})
+            return {"status": "ok", "deleted": result.deleted_count}
+    except Exception:
+        return JSONResponse({"status": "error", "message": "Failed to clear email history"}, status_code=500)
+
+
+@app.post("/api/smtp/check")
+def api_smtp_check(payload: dict):
+    try:
+        payload = payload or {}
+        settings = _get_merged_settings()
+        for key in (
+            "smtp_host",
+            "smtp_port",
+            "smtp_host_2",
+            "smtp_port_2",
+            "smtp_username",
+            "smtp_password",
+            "smtp_tls",
+            "smtp_from",
+        ):
+            if key in payload:
+                settings[key] = payload.get(key)
+
+        def build_status(host_key: str, port_key: str):
+            host = (settings.get(host_key) or "").strip()
+            port = _parse_int(settings.get(port_key))
+            if not host or not port:
+                return {"state": "not-configured", "up": False, "host": host or None, "port": port}
+            ok, err = _smtp_probe_target(settings, host, port)
+            return {
+                "state": "up" if ok else "down",
+                "up": bool(ok),
+                "host": host,
+                "port": port,
+                "error": err,
+            }
+
+        return {
+            "status": "ok",
+            "primary": build_status("smtp_host", "smtp_port"),
+            "secondary": build_status("smtp_host_2", "smtp_port_2"),
+        }
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
 @app.post("/api/smtp/test")
 def api_smtp_test(payload: dict):
     to_list = []
@@ -1223,7 +1780,13 @@ def api_smtp_test(payload: dict):
         if isinstance(db_s, dict):
             s.update(db_s)
 
+        if not _as_bool(s.get("email_enabled"), default=True):
+            return JSONResponse({"status": "error", "message": "Email sending is disabled in settings"}, status_code=400)
+
         to_all_saved = bool(payload.get("to_all_saved"))
+        smtp_mode = (payload.get("smtp_mode") or "auto").strip().lower()
+        if smtp_mode not in {"auto", "primary", "secondary", "both"}:
+            smtp_mode = "auto"
         to_list = []
         if to_all_saved:
             to_list = _normalize_smtp_to(s.get("smtp_to"))
@@ -1238,20 +1801,24 @@ def api_smtp_test(payload: dict):
             if not to_list:
                 return JSONResponse({"status": "error", "message": "Recipient 'to' is required"}, status_code=400)
 
+        subject, text_body, html_body = _build_test_email_content(int(time.time()), smtp_mode, len(to_list))
+
         ok, err, smtp_used = _send_alert_email(
             s,
             to_list,
-            "Cams WebApp SMTP Test",
-            "This is a test email from Cams WebApp.",
+            subject,
+            text_body,
+            mode=smtp_mode,
+            html_body=html_body,
         )
         if not ok:
-            return JSONResponse({"status": "error", "message": err or "SMTP send failed"}, status_code=500)
+            return JSONResponse({"status": "error", "message": err or "SMTP send failed", "smtp_used": smtp_used}, status_code=500)
         sent = list(to_list)
         try:
             app.state.db["email_events"].insert_one(
                 {
                     "created_at": int(time.time()),
-                    "subject": "Cams WebApp SMTP Test",
+                    "subject": subject,
                     "to": sent,
                     "alert_ids": [],
                     "count": len(sent),
@@ -1263,7 +1830,7 @@ def api_smtp_test(payload: dict):
             )
         except Exception:
             pass
-        return {"status": "ok", "sent": sent, "count": len(sent)}
+        return {"status": "ok", "sent": sent, "count": len(sent), "smtp_used": smtp_used}
     except Exception as e:
         try:
             app.state.db["email_events"].insert_one(

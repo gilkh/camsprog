@@ -283,6 +283,49 @@
       return '<span class="status-badge"><span class="status-dot offline"></span> Offline</span>';
     }
 
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function normalizeIpUrl(ip) {
+      const raw = (ip || '').trim();
+      if (!raw) return '';
+      // Accept URLs that already include protocol, otherwise default to http.
+      if (/^https?:\/\//i.test(raw)) {
+        return raw;
+      }
+      return `http://${raw}`;
+    }
+
+    function renderIpCell(ip) {
+      const raw = (ip || '').trim();
+      if (!raw) {
+        return '<span class="ip-cell">—</span>';
+      }
+      const safeLabel = escapeHtml(raw);
+      const safeHref = escapeHtml(normalizeIpUrl(raw));
+      return `<a class="ip-cell ip-link" href="${safeHref}" target="_blank" rel="noopener noreferrer">${safeLabel}</a>`;
+    }
+
+    function isNvrTimeShifted(value) {
+      const parsedMs = parseNvrTimeForSort(value);
+      if (parsedMs === null) return false;
+      return Math.abs(Date.now() - parsedMs) > (5 * 60 * 1000);
+    }
+
+    function renderNvrTimeCell(value) {
+      const raw = (value ?? '').toString();
+      if (!raw.trim()) return '—';
+      const safeValue = escapeHtml(raw);
+      if (!isNvrTimeShifted(raw)) return safeValue;
+      return `<span class="nvr-time-shifted" title="NVR time differs by more than 5 minutes">${safeValue}</span>`;
+    }
+
     function updateStats(nvrs) {
       const total = nvrs.length;
       const online = nvrs.filter(n => n.status === 'Online').length;
@@ -344,11 +387,11 @@
         const recDisplay = (recInt !== null && !Number.isNaN(recInt)) ? recInt : (recCount ?? '—');
         tr.innerHTML = `
             <td><span class="nvr-name">${nvr.name ?? ''}</span></td>
-            <td><span class="ip-cell">${nvr.ip ?? ''}</span></td>
+          <td>${renderIpCell(nvr.ip)}</td>
             <td><span class="password-cell" data-pw="${nvr.password || ''}" data-revealed="false" title="Click to reveal">${nvr.password ? '••••••' : '—'}</span></td>
             <td>${getStatusBadge(nvr.status)}</td>
             <td>${nvr.last_online ? new Date(nvr.last_online * 1000).toLocaleString() : '—'}</td>
-            <td>${nvr.nvr_time ?? '—'}</td>
+            <td>${renderNvrTimeCell(nvr.nvr_time)}</td>
             <td>${nvr.camera_count ?? '—'}</td>
             <td><div class="channel-list">${renderChannelStatuses(nvr.channel_statuses)}</div></td>
             <td>${recDisplay}</td>

@@ -315,6 +315,35 @@
         color: var(--text-muted);
         margin-top: 4px;
       }
+      .label-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+      .label-row label { margin-bottom: 0; }
+      .smtp-state {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        font-weight: 700;
+        border-radius: 999px;
+        padding: 3px 8px;
+      }
+      .smtp-state.up {
+        background: #dcfce7;
+        color: #166534;
+      }
+      .smtp-state.down {
+        background: #fee2e2;
+        color: #991b1b;
+      }
+      .smtp-state.unknown {
+        background: #e2e8f0;
+        color: #334155;
+      }
       .saved-recipient-box {
         margin-top: 14px;
         padding: 12px;
@@ -426,7 +455,10 @@
           <form id="smtp-form">
             <div class="form-row">
               <div class="form-group">
-                <label>Primary SMTP Host</label>
+                <div class="label-row">
+                  <label>Primary SMTP Host</label>
+                  <span id="smtp-primary-state" class="smtp-state unknown">Unknown</span>
+                </div>
                 <input type="text" id="smtp-host" placeholder="smtp1.example.com" />
               </div>
               <div class="form-group">
@@ -436,7 +468,10 @@
             </div>
             <div class="form-row">
               <div class="form-group">
-                <label>Secondary SMTP Host (Fallback)</label>
+                <div class="label-row">
+                  <label>Secondary SMTP Host (Fallback)</label>
+                  <span id="smtp-secondary-state" class="smtp-state unknown">Unknown</span>
+                </div>
                 <input type="text" id="smtp-host-2" placeholder="smtp2.example.com" />
               </div>
               <div class="form-group">
@@ -469,6 +504,15 @@
               </div>
             </div>
             <div class="form-group">
+              <label>Email Notifications</label>
+              <div class="toggle-wrapper" style="margin-top: 8px;">
+                <div class="toggle active" id="email-enabled-toggle"></div>
+                <span class="toggle-label">Enable all outgoing emails (alerts and tests)</span>
+                <input type="checkbox" id="email-enabled" checked hidden />
+              </div>
+              <div class="help-text">Turn this off to block all outgoing emails without removing SMTP settings</div>
+            </div>
+            <div class="form-group">
               <label>Alert Recipients</label>
               <textarea id="smtp-to" rows="4" placeholder="admin@example.com, security@example.com" style="width:100%; padding: 10px 14px; border: 1.5px solid var(--border); border-radius: 8px; font-size: 14px; background: #fff; transition: all 0.2s; font-family: inherit; resize: vertical;"></textarea>
               <div class="help-text">Add one or more email addresses separated by commas or new lines</div>
@@ -485,9 +529,19 @@
                 </svg>
                 Save SMTP Settings
               </button>
+              <button type="button" class="btn btn-secondary" id="smtp-check-btn">Check SMTP Status</button>
             </div>
           </form>
           <div style="margin-top: 20px; padding-top: 16px; border-top: 1px dashed var(--border);">
+            <div class="form-group">
+              <label>Manual Send Mode</label>
+              <select id="smtp-test-mode">
+                <option value="auto">Auto failover (Primary then Secondary)</option>
+                <option value="primary">Primary only</option>
+                <option value="secondary">Secondary only</option>
+                <option value="both">Try both SMTP servers</option>
+              </select>
+            </div>
             <div class="form-group">
               <label>Test Email Recipient</label>
               <div style="display: flex; gap: 10px;">
@@ -637,6 +691,7 @@
       }
 
       const tlsToggle = initToggle('smtp-tls-toggle', 'smtp-tls');
+      const emailEnabledToggle = initToggle('email-enabled-toggle', 'email-enabled');
       const bulkConfirmToggle = initToggle('bulk-confirm-toggle', 'bulk-confirm', (checked) => {
         document.getElementById('bulk-pass-btn').disabled = !checked;
       });
@@ -676,6 +731,102 @@
           .split(/[\n,]+/)
           .map(x => x.trim())
           .filter(Boolean);
+      }
+
+      function setSmtpStateBadge(which, state) {
+        const id = which === 'primary' ? 'smtp-primary-state' : 'smtp-secondary-state';
+        const el = document.getElementById(id);
+        const rawState = (state && state.state) ? String(state.state) : 'unknown';
+        const s = rawState.toLowerCase();
+        el.classList.remove('up', 'down', 'unknown');
+        if (s === 'up') {
+          el.classList.add('up');
+          el.textContent = 'Up';
+          el.title = `${state.host || ''}${state.port ? ':' + state.port : ''}`;
+        } else if (s === 'down') {
+          el.classList.add('down');
+          el.textContent = 'Down';
+          el.title = state.error || 'Connection failed';
+        } else if (s === 'not-configured') {
+          el.classList.add('unknown');
+          el.textContent = 'Not set';
+          el.title = 'Host or port not configured';
+        } else {
+          el.classList.add('unknown');
+          el.textContent = 'Unknown';
+          el.title = '';
+        }
+      }
+
+      function collectSmtpDraftPayload() {
+        return {
+          smtp_host: document.getElementById('smtp-host').value.trim() || null,
+          smtp_port: Number(document.getElementById('smtp-port').value) || null,
+          smtp_host_2: document.getElementById('smtp-host-2').value.trim() || null,
+          smtp_port_2: Number(document.getElementById('smtp-port-2').value) || null,
+          smtp_username: document.getElementById('smtp-username').value.trim() || null,
+          smtp_password: document.getElementById('smtp-password').value || null,
+          smtp_tls: tlsToggle.get(),
+          smtp_from: document.getElementById('smtp-from').value.trim() || null,
+        };
+      }
+
+      function formatSmtpUsed(smtpUsed) {
+        if (!smtpUsed) return 'unknown SMTP';
+        if (smtpUsed.host && smtpUsed.port) {
+          return `${smtpUsed.host}:${smtpUsed.port}`;
+        }
+        if (Array.isArray(smtpUsed.targets) && smtpUsed.targets.length) {
+          const targets = smtpUsed.targets
+            .map((x) => `${x.host}:${x.port}`)
+            .join(', ');
+          return `both (${targets})`;
+        }
+        return 'configured SMTP';
+      }
+
+      function formatAuthDiag(smtpUsed) {
+        if (!smtpUsed) return 'auth unknown';
+        const provided = smtpUsed.auth_provided ? 'provided' : 'empty';
+        const used = smtpUsed.auth_used ? 'used' : 'not used';
+        return `auth ${provided}, ${used}`;
+      }
+
+      function formatDeliveryDiag(smtpUsed) {
+        if (!smtpUsed) return '';
+        const deliveries = Array.isArray(smtpUsed.deliveries) ? smtpUsed.deliveries : [];
+        if (deliveries.length) {
+          const first = deliveries[0];
+          const resp = (first && first.data_response) ? String(first.data_response) : '';
+          return resp ? ` | DATA: ${resp}` : '';
+        }
+        if (Array.isArray(smtpUsed.targets) && smtpUsed.targets.length && Array.isArray(smtpUsed.targets[0].deliveries) && smtpUsed.targets[0].deliveries.length) {
+          const first = smtpUsed.targets[0].deliveries[0];
+          const resp = (first && first.data_response) ? String(first.data_response) : '';
+          return resp ? ` | DATA: ${resp}` : '';
+        }
+        return '';
+      }
+
+      async function checkSmtpStatus(showToastOnSuccess = false) {
+        try {
+          const res = await fetch('/api/smtp/check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(collectSmtpDraftPayload())
+          });
+          const data = await res.json();
+          if (!res.ok || data.status === 'error') {
+            throw new Error(data.message || 'SMTP check failed');
+          }
+          setSmtpStateBadge('primary', data.primary || {});
+          setSmtpStateBadge('secondary', data.secondary || {});
+          if (showToastOnSuccess) showToast('SMTP status updated');
+        } catch (err) {
+          setSmtpStateBadge('primary', { state: 'unknown' });
+          setSmtpStateBadge('secondary', { state: 'unknown' });
+          showToast('Failed to check SMTP status', 'error');
+        }
       }
 
       function renderSavedRecipients(recipients) {
@@ -736,6 +887,8 @@
           document.getElementById('smtp-to').value = recipients.join('\n');
           renderSavedRecipients(recipients);
           tlsToggle.set(Boolean(s.smtp_tls));
+          emailEnabledToggle.set(s.email_enabled !== false);
+          await checkSmtpStatus(false);
         } catch (e) {
           showToast('Failed to load settings', 'error');
         }
@@ -790,6 +943,7 @@
           smtp_username: document.getElementById('smtp-username').value.trim() || null,
           smtp_password: document.getElementById('smtp-password').value || null,
           smtp_tls: tlsToggle.get(),
+          email_enabled: emailEnabledToggle.get(),
           smtp_from: document.getElementById('smtp-from').value.trim() || null,
           smtp_to: parseRecipients(document.getElementById('smtp-to').value),
           alert_email_interval_seconds: Math.max(1, Number(document.getElementById('alert-email-interval').value) || 30) * 60,
@@ -804,6 +958,7 @@
           if (res.ok) {
             renderSavedRecipients(payload.smtp_to);
             showToast('SMTP settings saved successfully');
+            await checkSmtpStatus(false);
           } else {
             showToast('Failed to save SMTP settings', 'error');
           }
@@ -818,19 +973,21 @@
       document.getElementById('smtp-send-test').addEventListener('click', async () => {
         const btn = document.getElementById('smtp-send-test');
         const to = (document.getElementById('smtp-test-to').value || '').trim();
+        const smtpMode = document.getElementById('smtp-test-mode').value || 'auto';
         if (!to) return showToast('Please enter a test recipient email', 'warning');
         setLoading(btn, true);
         try {
           const res = await fetch('/api/smtp/test', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ to })
+            body: JSON.stringify({ to, smtp_mode: smtpMode })
           });
           const data = await res.json();
           if (res.ok && data.status !== 'error') {
-            showToast('Test email sent successfully');
+            showToast(`SMTP accepted via ${formatSmtpUsed(data.smtp_used)} (${formatAuthDiag(data.smtp_used)})${formatDeliveryDiag(data.smtp_used)}`);
           } else {
-            showToast('Send failed: ' + (data.message || 'Unknown error'), 'error');
+            const diag = data && data.smtp_used ? ` (${formatAuthDiag(data.smtp_used)})` : '';
+            showToast('Send failed: ' + (data.message || 'Unknown error') + diag, 'error');
           }
         } catch (err) {
           showToast('Request failed', 'error');
@@ -843,6 +1000,7 @@
       document.getElementById('smtp-send-test-all').addEventListener('click', async () => {
         const btn = document.getElementById('smtp-send-test-all');
         const recipients = [...savedRecipients];
+        const smtpMode = document.getElementById('smtp-test-mode').value || 'auto';
         if (!recipients.length) {
           return showToast('No saved recipients found', 'warning');
         }
@@ -858,20 +1016,25 @@
           const res = await fetch('/api/smtp/test', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ to_all_saved: true })
+            body: JSON.stringify({ to_all_saved: true, smtp_mode: smtpMode })
           });
           const data = await res.json();
           if (res.ok && data.status !== 'error') {
             const count = Number(data.count || recipients.length);
-            showToast(`Test email sent to ${formatRecipientCount(count)}`);
+            showToast(`SMTP accepted for ${formatRecipientCount(count)} via ${formatSmtpUsed(data.smtp_used)} (${formatAuthDiag(data.smtp_used)})${formatDeliveryDiag(data.smtp_used)}`);
           } else {
-            showToast('Send failed: ' + (data.message || 'Unknown error'), 'error');
+            const diag = data && data.smtp_used ? ` (${formatAuthDiag(data.smtp_used)})` : '';
+            showToast('Send failed: ' + (data.message || 'Unknown error') + diag, 'error');
           }
         } catch (err) {
           showToast('Request failed', 'error');
         } finally {
           setLoading(btn, false);
         }
+      });
+
+      document.getElementById('smtp-check-btn').addEventListener('click', async () => {
+        await checkSmtpStatus(true);
       });
 
       // Bulk password update

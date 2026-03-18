@@ -1,7 +1,9 @@
 import sys, os, unittest, json
+from unittest.mock import patch, mock_open, MagicMock, call
+import subprocess
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from app.monitor import MonitorState
+from app.monitor import MonitorState, load_nvrs_from_config, ping_ip
 
 
 class TestMilesightIpcstatusDetails(unittest.TestCase):
@@ -420,6 +422,181 @@ class TestHikvisionInputProxyModes(unittest.TestCase):
         self.assertEqual(modes[1], "recording")
         self.assertEqual(modes[2], "not-recording")
         self.assertEqual(modes[3], "no-camera")
+
+
+class TestLoadNvrsFromConfig(unittest.TestCase):
+    """Test loading NVRs from config.json with various structures."""
+
+    @patch('builtins.open', new_callable=mock_open, read_data='{"nvrs": [{"name": "NVR1", "ip": "192.168.1.100"}]}')
+    @patch('os.path.exists', return_value=True)
+    def test_load_nvrs_from_top_level_nvrs(self, mock_exists, mock_file):
+        """Should load NVRs from top-level 'nvrs' key."""
+        result = load_nvrs_from_config()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "NVR1")
+        self.assertEqual(result[0]["ip"], "192.168.1.100")
+
+    @patch('builtins.open', new_callable=mock_open, read_data='{"config": {"nvrs": [{"name": "NVR2", "ip": "192.168.1.101"}]}}')
+    @patch('os.path.exists', return_value=True)
+    def test_load_nvrs_from_nested_config_nvrs(self, mock_exists, mock_file):
+        """Should fallback to 'config.nvrs' if top-level 'nvrs' not present."""
+        result = load_nvrs_from_config()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "NVR2")
+
+    @patch('os.path.exists', return_value=False)
+    def test_load_nvrs_config_file_not_exists(self, mock_exists):
+        """Should return empty list when config.json doesn't exist."""
+        result = load_nvrs_from_config()
+        self.assertEqual(result, [])
+
+    @patch('builtins.open', new_callable=mock_open, read_data='invalid json')
+    @patch('os.path.exists', return_value=True)
+    def test_load_nvrs_malformed_json(self, mock_exists, mock_file):
+        """Should return empty list when JSON is malformed."""
+        result = load_nvrs_from_config()
+        self.assertEqual(result, [])
+
+    @patch('builtins.open', new_callable=mock_open, read_data='{"other_key": "value"}')
+    @patch('os.path.exists', return_value=True)
+    def test_load_nvrs_no_nvrs_key(self, mock_exists, mock_file):
+        """Should return empty list when 'nvrs' key is missing."""
+        result = load_nvrs_from_config()
+        self.assertEqual(result, [])
+
+
+class TestPingIp(unittest.TestCase):
+    """Test IP ping functionality."""
+
+    @patch('subprocess.run')
+    def test_ping_ip_online(self, mock_run):
+        """Should return True when ping succeeds (returncode 0)."""
+        mock_run.return_value = MagicMock(returncode=0)
+        result = ping_ip("192.168.1.1")
+        self.assertTrue(result)
+        mock_run.assert_called_once()
+
+    @patch('subprocess.run')
+    def test_ping_ip_offline(self, mock_run):
+        """Should return False when ping fails (returncode non-zero)."""
+        mock_run.return_value = MagicMock(returncode=1)
+        result = ping_ip("192.168.1.999")
+        self.assertFalse(result)
+
+    @patch('subprocess.run', side_effect=Exception("Network error"))
+    def test_ping_ip_exception(self, mock_run):
+        """Should return False when subprocess raises exception."""
+        result = ping_ip("invalid-ip")
+        self.assertFalse(result)
+
+    @patch('subprocess.run')
+    def test_ping_ip_custom_timeout(self, mock_run):
+        """Should use custom timeout value in ping command."""
+        mock_run.return_value = MagicMock(returncode=0)
+        ping_ip("192.168.1.1", timeout_ms=2000)
+        # Verify timeout is passed to ping command
+        call_args = mock_run.call_args[0][0]
+        self.assertIn("2000", call_args)
+
+
+class TestMonitorStateAddOrUpdateNvr(unittest.TestCase):
+    """Test adding and updating NVRs with field normalization."""
+
+    def setUp(self):
+        self.monitor = MonitorState(poll_interval=60, db=None)
+        self.monitor.nvrs = []
+
+    @patch.object(MonitorState, '_write_back')
+    def test_add_nvr_with_vendor_normalization(self, mock_write):
+        """Should normalize vendor type names (e.g., 'hickvision' -> 'Hikvision')."""
+        nvr_data = {
+            "name": "Test NVR",
+            "ip": "192.168.1.100",
+            "type": "hickvision",
+            "username": "admin",
+            "password": "pass123"
+        }
+        result = self.monitor.add_or_update_nvr(nvr_data)
+        self.assertEqual(result["type"], "Hikvision")
+        mock_write.assert_called_once()
+
+    @patch.object(MonitorState, '_write_back')
+    def test_add_nvr_milesight_normalization(self, mock_write):
+        """Should normalize 'mileSight' to 'Milesight'."""
+        nvr_data = {
+            "name": "Test NVR",
+            "ip": "192.168.1.101",
+            "type": "mileSight"
+        }
+        result = self.monitor.add_or_update_nvr(nvr_data)
+        self.assertEqual(result["type"], "Milesight")
+
+    @patch.object(MonitorState, '_write_back')
+    def test_add_nvr_missing_required_field(self, mock_write):
+        """Should raise ValueError when required field is missing."""
+        nvr_data = {"name": "Test NVR"}  # Missing 'ip'
+        with self.assertRaises(ValueError) as context:
+            self.monitor.add_or_update_nvr(nvr_data)
+        self.assertIn("ip", str(context.exception))
+
+    @patch.object(MonitorState, '_write_back')
+    def test_update_existing_nvr(self, mock_write):
+        """Should update existing NVR when IP matches."""
+        self.monitor.nvrs = [
+            {"name": "Old Name", "ip": "192.168.1.100", "type": "Hikvision"}
+        ]
+        nvr_data = {
+            "name": "New Name",
+            "ip": "192.168.1.100",
+            "type": "Hikvision"
+        }
+        result = self.monitor.add_or_update_nvr(nvr_data)
+        self.assertEqual(len(self.monitor.nvrs), 1)
+        self.assertEqual(self.monitor.nvrs[0]["name"], "New Name")
+
+    @patch.object(MonitorState, '_write_back')
+    def test_add_nvr_sets_default_fields(self, mock_write):
+        """Should set default fields for new NVR."""
+        nvr_data = {"name": "Test", "ip": "192.168.1.100"}
+        result = self.monitor.add_or_update_nvr(nvr_data)
+        self.assertEqual(result["status"], "Unknown")
+        self.assertIsNone(result["last_online"])
+        self.assertEqual(result["camera_count"], "Unknown")
+
+
+class TestMonitorStateDeleteNvr(unittest.TestCase):
+    """Test deleting NVRs by IP."""
+
+    def setUp(self):
+        self.monitor = MonitorState(poll_interval=60, db=None)
+        self.monitor.nvrs = [
+            {"name": "NVR1", "ip": "192.168.1.100"},
+            {"name": "NVR2", "ip": "192.168.1.101"},
+        ]
+
+    @patch.object(MonitorState, '_write_back')
+    def test_delete_nvr_by_ip(self, mock_write):
+        """Should delete NVR by IP and return True."""
+        result = self.monitor.delete_nvr("192.168.1.100")
+        self.assertTrue(result)
+        self.assertEqual(len(self.monitor.nvrs), 1)
+        self.assertEqual(self.monitor.nvrs[0]["ip"], "192.168.1.101")
+        mock_write.assert_called_once()
+
+    @patch.object(MonitorState, '_write_back')
+    def test_delete_nvr_not_found(self, mock_write):
+        """Should return False when IP not found."""
+        result = self.monitor.delete_nvr("192.168.1.999")
+        self.assertFalse(result)
+        self.assertEqual(len(self.monitor.nvrs), 2)
+        mock_write.assert_not_called()
+
+    @patch.object(MonitorState, '_write_back')
+    def test_delete_nvr_empty_ip(self, mock_write):
+        """Should return False when IP is empty."""
+        result = self.monitor.delete_nvr("")
+        self.assertFalse(result)
+        mock_write.assert_not_called()
 
 
 if __name__ == "__main__":

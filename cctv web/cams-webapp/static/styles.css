@@ -773,6 +773,26 @@ section.panel h2 {
   color: var(--text-secondary);
 }
 
+a.ip-link {
+  text-decoration: none;
+  border-bottom: 1px dashed transparent;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+a.ip-link:hover,
+a.ip-link:focus-visible {
+  color: var(--brand);
+  border-bottom-color: var(--brand);
+}
+
+.nvr-time-shifted {
+  text-decoration-line: underline;
+  text-decoration-style: solid;
+  text-decoration-color: var(--accent-red);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
 /* ─── NVR Name cell ─── */
 .nvr-name {
   font-weight: 600;
