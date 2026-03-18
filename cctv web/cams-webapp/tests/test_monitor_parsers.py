@@ -169,6 +169,19 @@ class TestHikvisionRecordingConfig(unittest.TestCase):
         self.assertEqual(modes[3], "not-recording")
 
 
+class TestHikvisionTimeFormatting(unittest.TestCase):
+    def setUp(self):
+        self.m = MonitorState.__new__(MonitorState)
+
+    def test_iso_with_timezone_trims_to_minute(self):
+        raw = "2026-03-18T10:48:49+02:00"
+        self.assertEqual(self.m._format_hikvision_time_value(raw), "2026-03-18 10:48")
+
+    def test_space_separated_with_seconds_trims_to_minute(self):
+        raw = "2026-03-18 10:48:49"
+        self.assertEqual(self.m._format_hikvision_time_value(raw), "2026-03-18 10:48")
+
+
 class TestHikvisionInputProxy(unittest.TestCase):
     def setUp(self):
         self.m = MonitorState.__new__(MonitorState)
@@ -313,6 +326,100 @@ class TestUniviewParsers(unittest.TestCase):
         text = json.dumps({"Response": {"Data": {"Nums": 8}}})
         cc = self.m._parse_uniview_channel_detail_infos_camera_count(text)
         self.assertEqual(cc, 8)
+
+    def test_uniview_time_value_from_xml(self):
+        xml = """<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+        <Time><localTime>2026-03-18T10:18:19+02:00</localTime></Time>"""
+        self.assertEqual(
+            self.m._parse_uniview_time_value(xml),
+            "2026-03-18T10:18:19+02:00",
+        )
+
+    def test_uniview_time_value_from_json(self):
+        text = json.dumps({"Response": {"Data": {"CurrentDeviceTime": "2026-03-18 10:18:19"}}})
+        self.assertEqual(self.m._parse_uniview_time_value(text), "2026-03-18 10:18:19")
+
+    def test_uniview_time_value_from_lapi_epoch(self):
+        text = json.dumps({
+            "Response": {
+                "Data": {
+                    "TimeZone": "GMT+02:00",
+                    "DeviceTime": 1773822563,
+                }
+            }
+        })
+        self.assertEqual(self.m._parse_uniview_time_value(text), "2026-03-18 10:29:23")
+
+    def test_uniview_lapi_record_schedule_mode_recording(self):
+        text = json.dumps({
+            "Response": {
+                "Data": {
+                    "Enabled": 1,
+                    "WeekPlan": {
+                        "Days": [
+                            {
+                                "TimeSectionInfos": [
+                                    {"Begin": "00:00:00", "End": "24:00:00", "ArmingType": 0}
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        })
+        self.assertEqual(self.m._parse_uniview_lapi_record_schedule_mode(text), "recording")
+
+    def test_uniview_lapi_record_schedule_mode_motion(self):
+        text = json.dumps({
+            "Response": {
+                "Data": {
+                    "Enabled": 1,
+                    "WeekPlan": {
+                        "Days": [
+                            {
+                                "TimeSectionInfos": [
+                                    {"Begin": "08:00:00", "End": "09:00:00", "ArmingType": 2}
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        })
+        self.assertEqual(self.m._parse_uniview_lapi_record_schedule_mode(text), "motion")
+
+    def test_uniview_lapi_record_schedule_mode_disabled(self):
+        text = json.dumps({"Response": {"Data": {"Enabled": 0}}})
+        self.assertEqual(self.m._parse_uniview_lapi_record_schedule_mode(text), "not-recording")
+
+
+class TestHikvisionInputProxyModes(unittest.TestCase):
+    def setUp(self):
+        self.m = MonitorState.__new__(MonitorState)
+
+    def test_inputproxy_channel_modes(self):
+        xml = """<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+        <InputProxyChannelStatusList>
+            <InputProxyChannelStatus>
+                <id>1</id>
+                <online>true</online>
+                <recording>true</recording>
+            </InputProxyChannelStatus>
+            <InputProxyChannelStatus>
+                <id>2</id>
+                <online>true</online>
+                <recording>false</recording>
+            </InputProxyChannelStatus>
+            <InputProxyChannelStatus>
+                <id>3</id>
+                <online>false</online>
+                <recording>false</recording>
+            </InputProxyChannelStatus>
+        </InputProxyChannelStatusList>"""
+        modes = self.m._parse_hikvision_inputproxy_channels_status_channel_modes(xml)
+        self.assertEqual(modes[1], "recording")
+        self.assertEqual(modes[2], "not-recording")
+        self.assertEqual(modes[3], "no-camera")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Logs - Cams WebApp</title>
+    <style>
+      :root {
+        --bg: #f3f6fb;
+        --card: #ffffff;
+        --text: #172033;
+        --muted: #677184;
+        --border: #dbe3ef;
+        --critical: #dc2626;
+        --warning: #d97706;
+        --noncritical: #0ea5e9;
+        --ok: #16a34a;
+        --fail: #b91c1c;
+        --headerA: #0f172a;
+        --headerB: #1e293b;
+        --radius: 12px;
+        --shadow: 0 2px 5px rgba(0, 0, 0, 0.06), 0 10px 30px rgba(15, 23, 42, 0.07);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      header {
+        background: linear-gradient(135deg, var(--headerA), var(--headerB));
+        color: #fff;
+        padding: 14px 22px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      h1 { margin: 0; font-size: 22px; }
+      .header-actions {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+      .nav-link {
+        text-decoration: none;
+        color: #cbd5e1;
+        padding: 8px 12px;
+        border-radius: 8px;
+        border: 1px solid #334155;
+        font-size: 14px;
+      }
+      .nav-link:hover { background: #334155; color: #fff; }
+      main {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .top-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(180px, 1fr));
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+      .stat {
+        background: var(--card);
+        border-radius: var(--radius);
+        padding: 14px;
+        border: 1px solid var(--border);
+        box-shadow: var(--shadow);
+      }
+      .stat .k { color: var(--muted); font-size: 12px; }
+      .stat .v { font-size: 24px; font-weight: 700; margin-top: 4px; }
+      .panel {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        margin-bottom: 14px;
+      }
+      .panel-header {
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .panel-title {
+        margin: 0;
+        font-size: 16px;
+      }
+      .panel-tools {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .chip {
+        border: 1px solid var(--border);
+        background: #f8fbff;
+        color: #334155;
+        border-radius: 999px;
+        padding: 6px 11px;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .chip.active { background: #dbeafe; border-color: #93c5fd; color: #1e40af; }
+      .btn {
+        border: 1px solid var(--border);
+        background: #f8fafc;
+        color: var(--text);
+        border-radius: 9px;
+        padding: 8px 12px;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .btn:hover { background: #eef2f7; }
+      .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+      .btn-danger { background: #fee2e2; border-color: #fecaca; color: #991b1b; }
+      .table-wrap {
+        overflow: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 840px;
+      }
+      th, td {
+        text-align: left;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        font-size: 13px;
+        vertical-align: top;
+      }
+      th { color: #475569; font-weight: 700; background: #f8fbff; }
+      .sev {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 4px 8px;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .sev.critical { background: #fee2e2; color: var(--critical); }
+      .sev.warning { background: #fef3c7; color: var(--warning); }
+      .sev.non-critical { background: #e0f2fe; color: var(--noncritical); }
+      .muted { color: var(--muted); }
+      .status-badge {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 4px 8px;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .status-badge.ok { background: #dcfce7; color: #166534; }
+      .status-badge.fail { background: #fee2e2; color: #991b1b; }
+      .split {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+      .empty {
+        padding: 16px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .toast-wrap {
+        position: fixed;
+        top: 16px;
+        right: 16px;
+        z-index: 20;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .toast {
+        background: #0f172a;
+        color: #fff;
+        padding: 10px 14px;
+        border-radius: 10px;
+        font-size: 13px;
+        box-shadow: var(--shadow);
+      }
+      .toast.error { background: #b91c1c; }
+      .modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.45);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 30;
+      }
+      .modal-overlay.active { display: flex; }
+      .modal {
+        background: #fff;
+        width: min(450px, 92%);
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        box-shadow: var(--shadow);
+        padding: 18px;
+      }
+      .modal h3 { margin: 0 0 8px 0; }
+      .modal p { margin: 0 0 14px 0; color: var(--muted); }
+      .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+      @media (max-width: 980px) {
+        .top-grid { grid-template-columns: 1fr 1fr; }
+        .split { grid-template-columns: 1fr; }
+      }
+      @media (max-width: 620px) {
+        .top-grid { grid-template-columns: 1fr; }
+        .panel-header { flex-direction: column; align-items: flex-start; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Alert Logs</h1>
+      <div class="header-actions">
+        <a class="nav-link" href="/">◧ Dashboard</a>
+        <a class="nav-link" href="/settings">⚙ Settings</a>
+      </div>
+    </header>
+
+    <main>
+      <div class="top-grid">
+        <div class="stat"><div class="k">Active Alerts</div><div class="v" id="count-total">0</div></div>
+        <div class="stat"><div class="k">Critical</div><div class="v" id="count-critical">0</div></div>
+        <div class="stat"><div class="k">Warning</div><div class="v" id="count-warning">0</div></div>
+        <div class="stat"><div class="k">Non-Critical</div><div class="v" id="count-noncritical">0</div></div>
+      </div>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Active Alerts</h2>
+          <div class="panel-tools">
+            <button class="chip active" data-filter="all">All</button>
+            <button class="chip" data-filter="critical">Critical</button>
+            <button class="chip" data-filter="warning">Warning</button>
+            <button class="chip" data-filter="non-critical">Non-Critical</button>
+            <button class="btn" id="btn-refresh">Refresh</button>
+            <button class="btn btn-danger" id="btn-ack-visible">Acknowledge Visible</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Severity</th>
+                <th>Type</th>
+                <th>NVR</th>
+                <th>Message</th>
+                <th>First Seen</th>
+                <th>Last Seen</th>
+                <th>Ack</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="alerts-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="split">
+        <section class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title">Acknowledgement History</h2>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Severity</th>
+                  <th>NVR</th>
+                  <th>Message</th>
+                </tr>
+              </thead>
+              <tbody id="acks-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title">Email Send History</h2>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Status</th>
+                  <th>Alerts</th>
+                  <th>Recipients</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody id="emails-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <div class="toast-wrap" id="toast-wrap"></div>
+
+    <div class="modal-overlay" id="confirm-modal">
+      <div class="modal">
+        <h3 id="confirm-title">Confirm</h3>
+        <p id="confirm-msg">Continue?</p>
+        <div class="modal-actions">
+          <button class="btn" id="confirm-cancel">Cancel</button>
+          <button class="btn btn-danger" id="confirm-ok">Acknowledge</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      let activeFilter = 'all';
+      let latestPayload = null;
+      let autoTimer = null;
+      let pendingConfirm = null;
+
+      function showToast(msg, isError = false) {
+        const wrap = document.getElementById('toast-wrap');
+        const el = document.createElement('div');
+        el.className = `toast${isError ? ' error' : ''}`;
+        el.textContent = msg;
+        wrap.appendChild(el);
+        setTimeout(() => el.remove(), 3500);
+      }
+
+      function formatTs(ts) {
+        if (!ts) return '—';
+        const d = new Date(Number(ts) * 1000);
+        if (Number.isNaN(d.getTime())) return '—';
+        return d.toLocaleString();
+      }
+
+      function severityBadge(sev) {
+        const safe = sev || 'warning';
+        return `<span class="sev ${safe}">${safe}</span>`;
+      }
+
+      function cleanText(v) {
+        return String(v ?? '').replace(/[&<>"']/g, (m) => ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#039;'
+        }[m]));
+      }
+
+      function applyCounts(counts) {
+        document.getElementById('count-total').textContent = counts?.total ?? 0;
+        document.getElementById('count-critical').textContent = counts?.critical ?? 0;
+        document.getElementById('count-warning').textContent = counts?.warning ?? 0;
+        document.getElementById('count-noncritical').textContent = counts?.non_critical ?? 0;
+      }
+
+      function getFilteredAlerts(payload) {
+        const all = Array.isArray(payload?.active_alerts) ? payload.active_alerts : [];
+        if (activeFilter === 'all') return all;
+        return all.filter((x) => (x.severity || '') === activeFilter);
+      }
+
+      function renderAlerts(payload) {
+        const body = document.getElementById('alerts-body');
+        const alerts = getFilteredAlerts(payload);
+        body.innerHTML = '';
+        if (!alerts.length) {
+          body.innerHTML = '<tr><td colspan="8" class="empty">No active alerts for this filter.</td></tr>';
+          return;
+        }
+        for (const a of alerts) {
+          const ack = a.acknowledged ? `<span class="status-badge ok">Ack at ${formatTs(a.acknowledged_at)}</span>` : '<span class="status-badge fail">Not Acked</span>';
+          const canAck = !a.acknowledged;
+          const btn = canAck
+            ? `<button class="btn" data-action="ack" data-id="${cleanText(a._id)}">Acknowledge</button>`
+            : '<button class="btn" disabled>Acknowledged</button>';
+          body.insertAdjacentHTML('beforeend', `
+            <tr>
+              <td>${severityBadge(a.severity)}</td>
+              <td>${cleanText(a.alert_type)}</td>
+              <td>${cleanText(a.nvr_name)}<div class="muted">${cleanText(a.nvr_ip)}</div></td>
+              <td>${cleanText(a.message)}</td>
+              <td>${formatTs(a.first_seen)}</td>
+              <td>${formatTs(a.last_seen)}</td>
+              <td>${ack}</td>
+              <td>${btn}</td>
+            </tr>
+          `);
+        }
+      }
+
+      function renderAckHistory(payload) {
+        const body = document.getElementById('acks-body');
+        const rows = Array.isArray(payload?.ack_history) ? payload.ack_history : [];
+        body.innerHTML = '';
+        if (!rows.length) {
+          body.innerHTML = '<tr><td colspan="4" class="empty">No acknowledgements yet.</td></tr>';
+          return;
+        }
+        for (const r of rows) {
+          body.insertAdjacentHTML('beforeend', `
+            <tr>
+              <td>${formatTs(r.acknowledged_at)}</td>
+              <td>${severityBadge(r.severity)}</td>
+              <td>${cleanText(r.nvr_name)}<div class="muted">${cleanText(r.nvr_ip)}</div></td>
+              <td>${cleanText(r.message)}</td>
+            </tr>
+          `);
+        }
+      }
+
+      function renderEmailHistory(payload) {
+        const body = document.getElementById('emails-body');
+        const rows = Array.isArray(payload?.email_history) ? payload.email_history : [];
+        body.innerHTML = '';
+        if (!rows.length) {
+          body.innerHTML = '<tr><td colspan="5" class="empty">No email history yet.</td></tr>';
+          return;
+        }
+        for (const e of rows) {
+          const status = e.success ? '<span class="status-badge ok">Success</span>' : '<span class="status-badge fail">Failed</span>';
+          const recipients = Array.isArray(e.to) ? e.to.join(', ') : '';
+          body.insertAdjacentHTML('beforeend', `
+            <tr>
+              <td>${formatTs(e.created_at)}</td>
+              <td>${status}</td>
+              <td>${cleanText(e.count ?? 0)}</td>
+              <td>${cleanText(recipients)}</td>
+              <td>${cleanText(e.error || '')}</td>
+            </tr>
+          `);
+        }
+      }
+
+      async function loadLogs(showOkToast = false) {
+        try {
+          const res = await fetch('/api/logs');
+          const payload = await res.json();
+          if (!res.ok || payload.status === 'error') {
+            throw new Error(payload.message || 'Failed to load logs');
+          }
+          latestPayload = payload;
+          applyCounts(payload.counts || {});
+          renderAlerts(payload);
+          renderAckHistory(payload);
+          renderEmailHistory(payload);
+          if (showOkToast) showToast('Logs refreshed');
+        } catch (err) {
+          showToast(String(err.message || err), true);
+        }
+      }
+
+      function showConfirm(title, msg) {
+        const modal = document.getElementById('confirm-modal');
+        document.getElementById('confirm-title').textContent = title;
+        document.getElementById('confirm-msg').textContent = msg;
+        modal.classList.add('active');
+        return new Promise((resolve) => { pendingConfirm = resolve; });
+      }
+
+      function closeConfirm(answer) {
+        const modal = document.getElementById('confirm-modal');
+        modal.classList.remove('active');
+        if (pendingConfirm) {
+          pendingConfirm(answer);
+          pendingConfirm = null;
+        }
+      }
+
+      async function acknowledgeOne(alertId) {
+        const ok = await showConfirm('Acknowledge Alert', 'This will stop recurring email sends for this alert while it stays active. Continue?');
+        if (!ok) return;
+        try {
+          const res = await fetch('/api/logs/ack', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ alert_id: alertId })
+          });
+          const payload = await res.json();
+          if (!res.ok || payload.status === 'error') {
+            throw new Error(payload.message || 'Acknowledge failed');
+          }
+          showToast('Alert acknowledged');
+          await loadLogs(false);
+        } catch (err) {
+          showToast(String(err.message || err), true);
+        }
+      }
+
+      async function acknowledgeVisible() {
+        const list = getFilteredAlerts(latestPayload || {}).filter((x) => !x.acknowledged);
+        if (!list.length) {
+          showToast('No unacknowledged alerts in current filter');
+          return;
+        }
+        const sev = activeFilter === 'all' ? null : activeFilter;
+        const ok = await showConfirm('Acknowledge Visible Alerts', `Acknowledge ${list.length} alert(s) and stop repeated emails for them?`);
+        if (!ok) return;
+        try {
+          const res = await fetch('/api/logs/ack_all', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ severity: sev })
+          });
+          const payload = await res.json();
+          if (!res.ok || payload.status === 'error') {
+            throw new Error(payload.message || 'Bulk acknowledge failed');
+          }
+          showToast(`Acknowledged ${payload.count || 0} alert(s)`);
+          await loadLogs(false);
+        } catch (err) {
+          showToast(String(err.message || err), true);
+        }
+      }
+
+      function scheduleAutoRefresh() {
+        if (autoTimer) clearInterval(autoTimer);
+        autoTimer = setInterval(() => loadLogs(false), 20000);
+      }
+
+      document.getElementById('confirm-cancel').addEventListener('click', () => closeConfirm(false));
+      document.getElementById('confirm-ok').addEventListener('click', () => closeConfirm(true));
+      document.getElementById('confirm-modal').addEventListener('click', (e) => {
+        if (e.target.id === 'confirm-modal') closeConfirm(false);
+      });
+
+      document.getElementById('btn-refresh').addEventListener('click', () => loadLogs(true));
+      document.getElementById('btn-ack-visible').addEventListener('click', acknowledgeVisible);
+
+      document.addEventListener('click', (e) => {
+        const chip = e.target.closest('.chip[data-filter]');
+        if (chip) {
+          activeFilter = chip.dataset.filter;
+          document.querySelectorAll('.chip[data-filter]').forEach((c) => c.classList.toggle('active', c === chip));
+          renderAlerts(latestPayload || {});
+          return;
+        }
+        const ackBtn = e.target.closest('button[data-action="ack"]');
+        if (ackBtn) {
+          acknowledgeOne(ackBtn.dataset.id);
+        }
+      });
+
+      window.addEventListener('DOMContentLoaded', async () => {
+        await loadLogs(false);
+        scheduleAutoRefresh();
+      });
+    </script>
+  </body>
+</html>

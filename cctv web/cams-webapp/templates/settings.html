@@ -315,6 +315,45 @@
         color: var(--text-muted);
         margin-top: 4px;
       }
+      .saved-recipient-box {
+        margin-top: 14px;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: #f8fafc;
+      }
+      .saved-recipient-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 8px;
+      }
+      .saved-recipient-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text);
+      }
+      .saved-recipient-count {
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+      .saved-recipient-list {
+        margin: 0;
+        padding-left: 18px;
+        max-height: 110px;
+        overflow: auto;
+        color: var(--text-muted);
+        font-size: 13px;
+      }
+      .saved-recipient-list li {
+        margin-bottom: 4px;
+      }
+      .saved-recipient-actions {
+        margin-top: 10px;
+        display: flex;
+        justify-content: flex-end;
+      }
       @media (max-width: 768px) {
         .settings-grid { grid-template-columns: 1fr; }
         .form-row, .form-row-3 { grid-template-columns: 1fr; }
@@ -387,12 +426,22 @@
           <form id="smtp-form">
             <div class="form-row">
               <div class="form-group">
-                <label>SMTP Host</label>
-                <input type="text" id="smtp-host" placeholder="smtp.example.com" />
+                <label>Primary SMTP Host</label>
+                <input type="text" id="smtp-host" placeholder="smtp1.example.com" />
               </div>
               <div class="form-group">
-                <label>Port</label>
+                <label>Primary Port</label>
                 <input type="number" id="smtp-port" min="1" max="65535" placeholder="587" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Secondary SMTP Host (Fallback)</label>
+                <input type="text" id="smtp-host-2" placeholder="smtp2.example.com" />
+              </div>
+              <div class="form-group">
+                <label>Secondary Port</label>
+                <input type="number" id="smtp-port-2" min="1" max="65535" placeholder="587" />
               </div>
             </div>
             <div class="form-row">
@@ -419,6 +468,16 @@
                 </div>
               </div>
             </div>
+            <div class="form-group">
+              <label>Alert Recipients</label>
+              <textarea id="smtp-to" rows="4" placeholder="admin@example.com, security@example.com" style="width:100%; padding: 10px 14px; border: 1.5px solid var(--border); border-radius: 8px; font-size: 14px; background: #fff; transition: all 0.2s; font-family: inherit; resize: vertical;"></textarea>
+              <div class="help-text">Add one or more email addresses separated by commas or new lines</div>
+            </div>
+            <div class="form-group">
+              <label>Alert Email Interval (minutes)</label>
+              <input type="number" id="alert-email-interval" min="1" max="1440" placeholder="30" />
+              <div class="help-text">How often unacknowledged active alerts can send repeated emails (minimum 1 minute)</div>
+            </div>
             <div class="form-actions">
               <button type="submit" class="btn btn-primary" id="smtp-save-btn">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -439,6 +498,22 @@
                     <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
                   </svg>
                   Send Test
+                </button>
+              </div>
+            </div>
+            <div class="saved-recipient-box">
+              <div class="saved-recipient-head">
+                <div class="saved-recipient-title">Saved Recipients</div>
+                <div class="saved-recipient-count" id="saved-recipient-count">0 recipients</div>
+              </div>
+              <ol class="saved-recipient-list" id="saved-recipient-list"></ol>
+              <div class="saved-recipient-actions">
+                <button class="btn btn-secondary" id="smtp-send-test-all" type="button" disabled>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 2L11 13"></path>
+                    <path d="M22 2L15 22L11 13L2 9L22 2Z"></path>
+                  </svg>
+                  Send Test to All Saved
                 </button>
               </div>
             </div>
@@ -565,6 +640,7 @@
       const bulkConfirmToggle = initToggle('bulk-confirm-toggle', 'bulk-confirm', (checked) => {
         document.getElementById('bulk-pass-btn').disabled = !checked;
       });
+      let savedRecipients = [];
 
       // Modal system
       let modalResolve = null;
@@ -590,6 +666,43 @@
       });
 
       // Load settings
+      function formatRecipientCount(n) {
+        return `${n} recipient${n === 1 ? '' : 's'}`;
+      }
+
+      function parseRecipients(value) {
+        const raw = String(value || '');
+        return raw
+          .split(/[\n,]+/)
+          .map(x => x.trim())
+          .filter(Boolean);
+      }
+
+      function renderSavedRecipients(recipients) {
+        savedRecipients = [...recipients];
+        const listEl = document.getElementById('saved-recipient-list');
+        const countEl = document.getElementById('saved-recipient-count');
+        const sendAllBtn = document.getElementById('smtp-send-test-all');
+
+        listEl.innerHTML = '';
+        countEl.textContent = formatRecipientCount(recipients.length);
+
+        if (!recipients.length) {
+          const li = document.createElement('li');
+          li.textContent = 'No recipients saved yet';
+          listEl.appendChild(li);
+          sendAllBtn.disabled = true;
+          return;
+        }
+
+        recipients.forEach((email) => {
+          const li = document.createElement('li');
+          li.textContent = email;
+          listEl.appendChild(li);
+        });
+        sendAllBtn.disabled = false;
+      }
+
       async function loadSettings() {
         try {
           const res = await fetch('/api/settings');
@@ -611,9 +724,17 @@
           // SMTP
           document.getElementById('smtp-host').value = s.smtp_host ?? '';
           document.getElementById('smtp-port').value = s.smtp_port ?? '';
+          document.getElementById('smtp-host-2').value = s.smtp_host_2 ?? '';
+          document.getElementById('smtp-port-2').value = s.smtp_port_2 ?? '';
           document.getElementById('smtp-username').value = s.smtp_username ?? '';
           document.getElementById('smtp-password').value = s.smtp_password ?? '';
           document.getElementById('smtp-from').value = s.smtp_from ?? '';
+          const intervalSeconds = Number(s.alert_email_interval_seconds ?? 1800);
+          const intervalMinutes = Math.max(1, Math.round(intervalSeconds / 60));
+          document.getElementById('alert-email-interval').value = intervalMinutes;
+          const recipients = Array.isArray(s.smtp_to) ? s.smtp_to : parseRecipients(s.smtp_to);
+          document.getElementById('smtp-to').value = recipients.join('\n');
+          renderSavedRecipients(recipients);
           tlsToggle.set(Boolean(s.smtp_tls));
         } catch (e) {
           showToast('Failed to load settings', 'error');
@@ -664,10 +785,14 @@
         const payload = {
           smtp_host: document.getElementById('smtp-host').value.trim() || null,
           smtp_port: Number(document.getElementById('smtp-port').value) || null,
+          smtp_host_2: document.getElementById('smtp-host-2').value.trim() || null,
+          smtp_port_2: Number(document.getElementById('smtp-port-2').value) || null,
           smtp_username: document.getElementById('smtp-username').value.trim() || null,
           smtp_password: document.getElementById('smtp-password').value || null,
           smtp_tls: tlsToggle.get(),
           smtp_from: document.getElementById('smtp-from').value.trim() || null,
+          smtp_to: parseRecipients(document.getElementById('smtp-to').value),
+          alert_email_interval_seconds: Math.max(1, Number(document.getElementById('alert-email-interval').value) || 30) * 60,
         };
         setLoading(btn, true);
         try {
@@ -677,6 +802,7 @@
             body: JSON.stringify(payload)
           });
           if (res.ok) {
+            renderSavedRecipients(payload.smtp_to);
             showToast('SMTP settings saved successfully');
           } else {
             showToast('Failed to save SMTP settings', 'error');
@@ -703,6 +829,41 @@
           const data = await res.json();
           if (res.ok && data.status !== 'error') {
             showToast('Test email sent successfully');
+          } else {
+            showToast('Send failed: ' + (data.message || 'Unknown error'), 'error');
+          }
+        } catch (err) {
+          showToast('Request failed', 'error');
+        } finally {
+          setLoading(btn, false);
+        }
+      });
+
+      // Test email to all saved recipients
+      document.getElementById('smtp-send-test-all').addEventListener('click', async () => {
+        const btn = document.getElementById('smtp-send-test-all');
+        const recipients = [...savedRecipients];
+        if (!recipients.length) {
+          return showToast('No saved recipients found', 'warning');
+        }
+
+        const confirmed = await showConfirm(
+          'Send Test to All Saved Recipients',
+          `This will send a test email to ${formatRecipientCount(recipients.length)}. Continue?`
+        );
+        if (!confirmed) return;
+
+        setLoading(btn, true);
+        try {
+          const res = await fetch('/api/smtp/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ to_all_saved: true })
+          });
+          const data = await res.json();
+          if (res.ok && data.status !== 'error') {
+            const count = Number(data.count || recipients.length);
+            showToast(`Test email sent to ${formatRecipientCount(count)}`);
           } else {
             showToast('Send failed: ' + (data.message || 'Unknown error'), 'error');
           }

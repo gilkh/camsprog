@@ -11,7 +11,7 @@ import time
 import subprocess
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any
 import requests
 from requests.auth import HTTPDigestAuth
@@ -785,7 +785,10 @@ class MonitorState:
                                 if elem.text and elem.text.strip():
                                     time_str = elem.text.strip()
                                     break
-                        nvr["nvr_time"] = time_str or "Unknown"
+                        if time_str:
+                            nvr["nvr_time"] = self._format_hikvision_time_value(time_str) or time_str
+                        else:
+                            nvr["nvr_time"] = "Unknown"
                     except Exception:
                         nvr["nvr_time"] = "Parse error"
                 else:
@@ -802,7 +805,10 @@ class MonitorState:
                                     if elem.text and elem.text.strip():
                                         time_str = elem.text.strip()
                                         break
-                            nvr["nvr_time"] = time_str or f"Time failed: {rs.status_code}"
+                            if time_str:
+                                nvr["nvr_time"] = self._format_hikvision_time_value(time_str) or time_str
+                            else:
+                                nvr["nvr_time"] = f"Time failed: {rs.status_code}"
                         except Exception:
                             nvr["nvr_time"] = f"Time failed: {rs.status_code}"
                     else:
@@ -909,60 +915,62 @@ class MonitorState:
                     )
             elif vendor == "Uniview":
                 auth_failed = False
-                time_url = f"http://{ip}/ISAPI/System/time"
-                r = session.get(time_url, timeout=6)
-                if r.status_code == 200 and r.text:
-                    try:
-                        root = ET.fromstring(r.text)
-                        time_str = None
-                        for elem in root.iter():
-                            tag = elem.tag
-                            if not isinstance(tag, str):
-                                continue
-                            lt = tag.lower()
-                            if lt.endswith("localtime") or lt.endswith("time") or lt.endswith("devicetime") or lt.endswith("currentdevicetime"):
-                                if elem.text and elem.text.strip():
-                                    time_str = elem.text.strip()
-                                    break
-                        nvr["nvr_time"] = time_str or "Unknown"
-                    except Exception:
-                        nvr["nvr_time"] = "Parse error"
-                elif r.status_code == 401:
-                    auth_failed = True
-                    nvr["nvr_time"] = "Auth failed"
-                else:
-                    status_url = f"http://{ip}/ISAPI/System/status"
-                    rs = session.get(status_url, timeout=6)
-                    if rs.status_code == 200 and rs.text:
-                        try:
-                            root = ET.fromstring(rs.text)
-                            time_str = None
-                            for elem in root.iter():
-                                tag = elem.tag
-                                if not isinstance(tag, str):
-                                    continue
-                                lt = tag.lower()
-                                if lt.endswith("currentdevicetime") or lt.endswith("devicetime") or lt.endswith("localtime"):
-                                    if elem.text and elem.text.strip():
-                                        time_str = elem.text.strip()
-                                        break
-                            nvr["nvr_time"] = time_str or f"Time failed: {r.status_code}"
-                        except Exception:
-                            nvr["nvr_time"] = f"Time failed: {r.status_code}"
-                    elif rs.status_code == 401:
-                        auth_failed = True
-                        nvr["nvr_time"] = "Auth failed"
-                    else:
-                        nvr["nvr_time"] = f"Time failed: {r.status_code}"
 
-                # Uniview camera/connected channels via LAPI
+                def uniview_get(path: str, timeout: int = 6):
+                    url = f"http://{ip}{path}"
+                    best_resp = None
+                    # Try digest-session first, then explicit basic auth fallback.
+                    for mode in ("digest", "basic"):
+                        try:
+                            if mode == "digest":
+                                resp = session.get(url, timeout=timeout)
+                            else:
+                                resp = requests.get(url, auth=(username, password), timeout=timeout)
+                        except Exception:
+                            continue
+                        best_resp = resp
+                        if resp.status_code == 200 and (resp.text or ""):
+                            return resp
+                    return best_resp
+
+                # Time: probe multiple endpoints and keep the first that yields a parseable value.
+                time_status = None
+                preferred_time_path = nvr.get("_uniview_time_path")
+                time_paths = [
+                    "/ISAPI/System/time",
+                    "/ISAPI/System/status",
+                    "/LAPI/V1.0/System/Time",
+                    "/ISAPI/System/deviceInfo",
+                ]
+                if isinstance(preferred_time_path, str) and preferred_time_path:
+                    time_paths = [preferred_time_path] + [p for p in time_paths if p != preferred_time_path]
+
+                for path in time_paths:
+                    tr = uniview_get(path, timeout=6)
+                    if tr is None:
+                        continue
+                    time_status = tr.status_code
+                    if tr.status_code == 401:
+                        auth_failed = True
+                        continue
+                    if tr.status_code != 200 or not tr.text:
+                        continue
+                    parsed_time = self._parse_uniview_time_value(tr.text)
+                    if parsed_time:
+                        nvr["nvr_time"] = parsed_time
+                        nvr["_uniview_time_path"] = path
+                        break
+
+                if nvr.get("nvr_time") == "Unknown":
+                    if auth_failed:
+                        nvr["nvr_time"] = "Auth failed"
+                    elif time_status is not None:
+                        nvr["nvr_time"] = f"Time failed: {time_status}"
+
+                # Camera count and connected set.
                 cam_count_val = None
                 connected_ids: set[int] | None = None
-                lapi_url = f"http://{ip}/LAPI/V1.0/Channels/System/ChannelDetailInfos"
-                try:
-                    lr = session.get(lapi_url, timeout=6)
-                except Exception:
-                    lr = None
+                lr = uniview_get("/LAPI/V1.0/Channels/System/ChannelDetailInfos", timeout=6)
                 if lr and lr.status_code == 200 and lr.text:
                     ids = self._parse_uniview_channel_detail_infos_connected_ids(lr.text)
                     if ids:
@@ -975,59 +983,195 @@ class MonitorState:
                     auth_failed = True
 
                 if connected_ids is None:
-                    ch_url = f"http://{ip}/ISAPI/System/Video/inputs/channels"
-                    rc = session.get(ch_url, timeout=5)
-                    if rc.status_code == 200 and rc.text:
+                    rc = uniview_get("/ISAPI/System/Video/inputs/channels", timeout=5)
+                    if rc and rc.status_code == 200 and rc.text:
                         connected_ids = self._parse_hikvision_inputs_connected_ids(rc.text)
                         if connected_ids:
                             cam_count_val = len(connected_ids)
-                    elif rc.status_code == 401:
+                    elif rc and rc.status_code == 401:
                         auth_failed = True
 
                 if cam_count_val is None:
-                    # Fallback to ISAPI
-                    stream_url = f"http://{ip}/ISAPI/Streaming/channels"
-                    sc = session.get(stream_url, timeout=5)
-                    if sc.status_code == 200 and sc.text:
+                    sc = uniview_get("/ISAPI/Streaming/channels", timeout=5)
+                    if sc and sc.status_code == 200 and sc.text:
                         cam_count_val = self._parse_hikvision_streaming_channels_physical_count(sc.text)
-                    elif sc.status_code == 401:
+                    elif sc and sc.status_code == 401:
                         auth_failed = True
                 if cam_count_val is not None:
                     nvr["camera_count"] = cam_count_val
 
-                # Recording policy and per-channel statuses for Uniview.
-                tracks_url = f"http://{ip}/ISAPI/ContentMgmt/record/tracks"
-                tr = session.get(tracks_url, timeout=6)
-                if tr.status_code == 200 and tr.text:
-                    channel_modes = self._parse_hikvision_record_tracks_channel_modes(tr.text)
-                    rec_configured = self._parse_hikvision_record_tracks_configured_channels(tr.text)
+                # Recording: probe known endpoints and cache the first one that works.
+                recording_set = False
 
-                    if connected_ids and rec_configured:
-                        nvr["recording_count"] = len(set(int(c) for c in connected_ids) & set(int(c) for c in rec_configured))
-                    elif rec_configured:
-                        nvr["recording_count"] = len(rec_configured)
+                # Primary Uniview firmware path discovered from web UI traffic:
+                # /LAPI/V1.0/Channels/{id}/Storage/Private/Schedule/Record/
+                schedule_modes: dict[int, str] = {}
+                schedule_record_ids: set[int] = set()
+                candidate_channel_ids: list[int] = []
+                if connected_ids:
+                    candidate_channel_ids = sorted(int(c) for c in connected_ids)
+                else:
+                    cc = nvr.get("camera_count")
+                    if isinstance(cc, int) and cc > 0:
+                        candidate_channel_ids = list(range(1, cc + 1))
+
+                for cid in candidate_channel_ids:
+                    schedule_path = f"/LAPI/V1.0/Channels/{cid}/Storage/Private/Schedule/Record/"
+                    sr = uniview_get(schedule_path, timeout=6)
+                    if sr is None:
+                        continue
+                    if sr.status_code == 401:
+                        auth_failed = True
+                        continue
+                    if sr.status_code != 200 or not sr.text:
+                        continue
+                    mode = self._parse_uniview_lapi_record_schedule_mode(sr.text)
+                    if mode is None:
+                        continue
+                    schedule_modes[int(cid)] = mode
+                    if mode in ("recording", "motion"):
+                        schedule_record_ids.add(int(cid))
+
+                if schedule_modes:
+                    if connected_ids is not None:
+                        connected_int = set(int(c) for c in connected_ids)
+                        nvr["recording_count"] = len(connected_int & schedule_record_ids)
+                    else:
+                        nvr["recording_count"] = len(schedule_record_ids)
 
                     channel_total = self._coerce_channel_total(
                         nvr.get("camera_count"),
                         connected_ids,
-                        rec_configured,
-                        set(channel_modes.keys()),
+                        set(schedule_modes.keys()),
+                        schedule_record_ids,
                         one_based=True,
                     )
                     nvr["channel_statuses"] = self._build_channel_statuses_from_modes(
                         channel_total,
-                        channel_modes,
+                        schedule_modes,
                         connected_ids=(set(int(c) for c in connected_ids) if connected_ids else None),
                     )
-                elif tr.status_code == 401:
-                    auth_failed = True
+                    nvr["_uniview_record_path"] = "/LAPI/V1.0/Channels/{id}/Storage/Private/Schedule/Record/"
+                    recording_set = True
+
+                preferred_record_path = nvr.get("_uniview_record_path")
+                record_paths = [
+                    "/ISAPI/ContentMgmt/record/tracks",
+                    "/ISAPI/ContentMgmt/record/status",
+                    "/ISAPI/ContentMgmt/InputProxy/channels/status",
+                    "/ISAPI/ContentMgmt/InputProxy/channels",
+                ]
+                if isinstance(preferred_record_path, str) and preferred_record_path:
+                    record_paths = [preferred_record_path] + [p for p in record_paths if p != preferred_record_path]
+
+                for record_path in ([] if recording_set else record_paths):
+                    rr = uniview_get(record_path, timeout=6)
+                    if rr is None:
+                        continue
+                    if rr.status_code == 401:
+                        auth_failed = True
+                        continue
+                    if rr.status_code != 200 or not rr.text:
+                        continue
+
+                    if record_path.endswith("/record/tracks"):
+                        channel_modes = self._parse_hikvision_record_tracks_channel_modes(rr.text)
+                        rec_configured = self._parse_hikvision_record_tracks_configured_channels(rr.text)
+
+                        if connected_ids and rec_configured:
+                            nvr["recording_count"] = len(set(int(c) for c in connected_ids) & set(int(c) for c in rec_configured))
+                            recording_set = True
+                        elif rec_configured:
+                            nvr["recording_count"] = len(rec_configured)
+                            recording_set = True
+
+                        if channel_modes:
+                            channel_total = self._coerce_channel_total(
+                                nvr.get("camera_count"),
+                                connected_ids,
+                                rec_configured,
+                                set(channel_modes.keys()),
+                                one_based=True,
+                            )
+                            nvr["channel_statuses"] = self._build_channel_statuses_from_modes(
+                                channel_total,
+                                channel_modes,
+                                connected_ids=(set(int(c) for c in connected_ids) if connected_ids else None),
+                            )
+
+                    elif record_path.endswith("/record/status"):
+                        rec = self._parse_hikvision_record_status_unique(rr.text)
+                        if rec is not None:
+                            nvr["recording_count"] = rec
+                            recording_set = True
+
+                    elif record_path.endswith("/InputProxy/channels/status"):
+                        proxy_ids_raw = self._parse_hikvision_inputproxy_channels_status_connected_ids(rr.text)
+                        proxy_connected_ids: set[int] = set()
+                        if proxy_ids_raw:
+                            for cid in proxy_ids_raw:
+                                try:
+                                    proxy_connected_ids.add(int(cid))
+                                except Exception:
+                                    pass
+                        if proxy_connected_ids and not connected_ids:
+                            connected_ids = proxy_connected_ids
+                            if cam_count_val is None:
+                                nvr["camera_count"] = len(proxy_connected_ids)
+
+                        proxy_modes = self._parse_hikvision_inputproxy_channels_status_channel_modes(rr.text)
+                        if proxy_modes:
+                            rec_ids = {int(cid) for cid, mode in proxy_modes.items() if mode == "recording"}
+                            if connected_ids and rec_ids:
+                                nvr["recording_count"] = len(set(int(c) for c in connected_ids) & rec_ids)
+                                recording_set = True
+                            elif rec_ids:
+                                nvr["recording_count"] = len(rec_ids)
+                                recording_set = True
+
+                            channel_total = self._coerce_channel_total(
+                                nvr.get("camera_count"),
+                                connected_ids,
+                                set(proxy_modes.keys()),
+                                rec_ids,
+                                one_based=True,
+                            )
+                            nvr["channel_statuses"] = self._build_channel_statuses_from_modes(
+                                channel_total,
+                                proxy_modes,
+                                connected_ids=(set(int(c) for c in connected_ids) if connected_ids else None),
+                            )
+
+                        if not recording_set:
+                            proxy_rec = self._parse_hikvision_inputproxy_channels_status_recording_count(rr.text)
+                            if proxy_rec is not None:
+                                nvr["recording_count"] = proxy_rec
+                                recording_set = True
+
+                    else:
+                        cfg_ids = self._parse_hikvision_inputproxy_record_config_ids(rr.text)
+                        if cfg_ids:
+                            cfg_int = set()
+                            for cid in cfg_ids:
+                                try:
+                                    cfg_int.add(int(cid))
+                                except Exception:
+                                    pass
+                            if connected_ids and cfg_int:
+                                nvr["recording_count"] = len(set(int(c) for c in connected_ids) & cfg_int)
+                                recording_set = True
+                            elif cfg_int:
+                                nvr["recording_count"] = len(cfg_int)
+                                recording_set = True
+
+                    if recording_set:
+                        nvr["_uniview_record_path"] = record_path
+                        break
 
                 if auth_failed and nvr.get("recording_count") in (None, "Unknown"):
                     nvr["camera_count"] = "Auth failed"
                     nvr["recording_count"] = "Auth failed"
                     nvr["channel_statuses"] = []
-
-                # recording counting removed
         except Exception:
             # Keep refresh robust; do not crash loop
             pass
@@ -1824,6 +1968,30 @@ class MonitorState:
         except Exception:
             return None
 
+    def _format_hikvision_time_value(self, text: str) -> str | None:
+        """Normalize Hikvision date/time text for UI display."""
+        if not text:
+            return None
+        raw = text.strip()
+        if not raw:
+            return None
+
+        normalized = raw
+        # Handle UTC shorthand that fromisoformat does not accept directly.
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+
+        try:
+            parsed = datetime.fromisoformat(normalized)
+            return parsed.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+
+        m = re.search(r"(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2})", raw)
+        if m:
+            return f"{m.group(1)} {m.group(2)}"
+        return None
+
     def _parse_hikvision_record_tracks_enabled_channels(self, xml_text: str):
         try:
             root = ET.fromstring(xml_text)
@@ -2132,6 +2300,46 @@ class MonitorState:
         except Exception:
             return None
 
+    def _parse_hikvision_inputproxy_channels_status_channel_modes(self, xml_text: str) -> dict[int, str]:
+        """Parse InputProxy channel status XML into per-channel recording modes."""
+        try:
+            root = ET.fromstring(xml_text)
+            modes: dict[int, str] = {}
+            for elem in root.iter():
+                tag = elem.tag
+                if not (isinstance(tag, str) and (tag.endswith('InputProxyChannelStatus') or tag.endswith('inputProxyChannelStatus') or tag.endswith('ChannelStatus'))):
+                    continue
+                chan_id = None
+                is_connected = False
+                is_recording = False
+                for ch in elem:
+                    ct = ch.tag
+                    if not isinstance(ct, str):
+                        continue
+                    tx = (ch.text or '').strip().lower()
+                    lct = ct.lower()
+                    if lct.endswith('id') or lct.endswith('channelid') or lct.endswith('videoinputid') or lct.endswith('dynvideoinputchannelid'):
+                        raw = (ch.text or '').strip()
+                        if raw.isdigit():
+                            chan_id = int(raw)
+                    elif lct.endswith('online') or lct.endswith('connectstatus'):
+                        if tx in {'online', 'connected', 'true', '1'}:
+                            is_connected = True
+                    elif lct.endswith('recording'):
+                        if tx in {'started', 'on', 'true', '1', 'recording'}:
+                            is_recording = True
+                if chan_id is None:
+                    continue
+                if not is_connected:
+                    modes[chan_id] = 'no-camera'
+                elif is_recording:
+                    modes[chan_id] = 'recording'
+                else:
+                    modes[chan_id] = 'not-recording'
+            return modes
+        except Exception:
+            return {}
+
     def _parse_hikvision_inputproxy_record_config_count(self, xml_text: str):
         try:
             root = ET.fromstring(xml_text)
@@ -2314,5 +2522,116 @@ class MonitorState:
                     cid = idx
                 ids.add(int(cid))
             return ids if ids else None
+        except Exception:
+            return None
+
+    def _parse_uniview_time_value(self, text: str) -> str | None:
+        """Parse Uniview time from XML or JSON bodies used by ISAPI/LAPI."""
+        # XML first
+        try:
+            root = ET.fromstring(text)
+            for elem in root.iter():
+                tag = elem.tag
+                if not isinstance(tag, str):
+                    continue
+                lt = tag.lower()
+                if lt.endswith("localtime") or lt.endswith("time") or lt.endswith("devicetime") or lt.endswith("currentdevicetime"):
+                    if elem.text and elem.text.strip():
+                        return elem.text.strip()
+        except Exception:
+            pass
+
+        # JSON fallback
+        try:
+            data = json.loads(text)
+
+            # Special handling for LAPI time payload where DeviceTime is epoch seconds.
+            try:
+                resp = data.get("Response") if isinstance(data, dict) else None
+                dnode = resp.get("Data") if isinstance(resp, dict) else None
+                if isinstance(dnode, dict) and isinstance(dnode.get("DeviceTime"), (int, float)):
+                    ts = int(dnode.get("DeviceTime"))
+                    tz_text = dnode.get("TimeZone")
+                    tzinfo = None
+                    if isinstance(tz_text, str):
+                        m = re.match(r"^GMT([+-])(\d{1,2}):(\d{2})$", tz_text.strip(), flags=re.IGNORECASE)
+                        if m:
+                            sign = 1 if m.group(1) == "+" else -1
+                            hh = int(m.group(2))
+                            mm = int(m.group(3))
+                            tzinfo = timezone(sign * timedelta(hours=hh, minutes=mm))
+                    if tzinfo is not None:
+                        return datetime.fromtimestamp(ts, tz=tzinfo).strftime("%Y-%m-%d %H:%M:%S")
+                    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+
+            stack = [data]
+            while stack:
+                node = stack.pop()
+                if isinstance(node, dict):
+                    for key, value in node.items():
+                        k = str(key).lower()
+                        if isinstance(value, str) and value.strip() and (
+                            k.endswith("localtime") or k.endswith("time") or k.endswith("devicetime") or k.endswith("currentdevicetime")
+                        ):
+                            return value.strip()
+                        if isinstance(value, (dict, list)):
+                            stack.append(value)
+                elif isinstance(node, list):
+                    for value in node:
+                        if isinstance(value, (dict, list)):
+                            stack.append(value)
+        except Exception:
+            pass
+        return None
+
+    def _parse_uniview_lapi_record_schedule_mode(self, text: str) -> str | None:
+        """Parse Uniview LAPI record schedule response into channel mode.
+
+        Endpoint shape: /LAPI/V1.0/Channels/{id}/Storage/Private/Schedule/Record/
+        """
+        try:
+            data = json.loads(text)
+            resp = data.get("Response") if isinstance(data, dict) else None
+            dnode = resp.get("Data") if isinstance(resp, dict) else None
+            if not isinstance(dnode, dict):
+                return None
+
+            enabled = int(dnode.get("Enabled", 0) or 0)
+            if enabled != 1:
+                return "not-recording"
+
+            week = dnode.get("WeekPlan")
+            days = week.get("Days") if isinstance(week, dict) else None
+            if not isinstance(days, list):
+                return "recording"
+
+            has_recording = False
+            has_motion = False
+            for day in days:
+                if not isinstance(day, dict):
+                    continue
+                sections = day.get("TimeSectionInfos")
+                if not isinstance(sections, list):
+                    continue
+                for section in sections:
+                    if not isinstance(section, dict):
+                        continue
+                    begin = str(section.get("Begin", "")).strip()
+                    end = str(section.get("End", "")).strip()
+                    if not begin or not end or begin == end:
+                        continue
+                    arming_type = int(section.get("ArmingType", 0) or 0)
+                    if arming_type == 0:
+                        has_recording = True
+                    elif arming_type > 0:
+                        has_motion = True
+
+            if has_motion:
+                return "motion"
+            if has_recording:
+                return "recording"
+            return "not-recording"
         except Exception:
             return None
