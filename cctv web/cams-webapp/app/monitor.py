@@ -908,6 +908,7 @@ class MonitorState:
                         connected_ids=(set(int(c) for c in connected_ids) if connected_ids else None),
                     )
             elif vendor == "Uniview":
+                auth_failed = False
                 time_url = f"http://{ip}/ISAPI/System/time"
                 r = session.get(time_url, timeout=6)
                 if r.status_code == 200 and r.text:
@@ -926,6 +927,9 @@ class MonitorState:
                         nvr["nvr_time"] = time_str or "Unknown"
                     except Exception:
                         nvr["nvr_time"] = "Parse error"
+                elif r.status_code == 401:
+                    auth_failed = True
+                    nvr["nvr_time"] = "Auth failed"
                 else:
                     status_url = f"http://{ip}/ISAPI/System/status"
                     rs = session.get(status_url, timeout=6)
@@ -945,33 +949,83 @@ class MonitorState:
                             nvr["nvr_time"] = time_str or f"Time failed: {r.status_code}"
                         except Exception:
                             nvr["nvr_time"] = f"Time failed: {r.status_code}"
+                    elif rs.status_code == 401:
+                        auth_failed = True
+                        nvr["nvr_time"] = "Auth failed"
                     else:
                         nvr["nvr_time"] = f"Time failed: {r.status_code}"
 
-                # Uniview camera count via LAPI
+                # Uniview camera/connected channels via LAPI
                 cam_count_val = None
+                connected_ids: set[int] | None = None
                 lapi_url = f"http://{ip}/LAPI/V1.0/Channels/System/ChannelDetailInfos"
                 try:
                     lr = session.get(lapi_url, timeout=6)
                 except Exception:
                     lr = None
                 if lr and lr.status_code == 200 and lr.text:
+                    ids = self._parse_uniview_channel_detail_infos_connected_ids(lr.text)
+                    if ids:
+                        connected_ids = ids
+                        cam_count_val = len(ids)
                     cc = self._parse_uniview_channel_detail_infos_camera_count(lr.text)
                     if cc is not None:
                         cam_count_val = cc
+                elif lr and lr.status_code == 401:
+                    auth_failed = True
+
+                if connected_ids is None:
+                    ch_url = f"http://{ip}/ISAPI/System/Video/inputs/channels"
+                    rc = session.get(ch_url, timeout=5)
+                    if rc.status_code == 200 and rc.text:
+                        connected_ids = self._parse_hikvision_inputs_connected_ids(rc.text)
+                        if connected_ids:
+                            cam_count_val = len(connected_ids)
+                    elif rc.status_code == 401:
+                        auth_failed = True
+
                 if cam_count_val is None:
                     # Fallback to ISAPI
                     stream_url = f"http://{ip}/ISAPI/Streaming/channels"
                     sc = session.get(stream_url, timeout=5)
                     if sc.status_code == 200 and sc.text:
                         cam_count_val = self._parse_hikvision_streaming_channels_physical_count(sc.text)
-                if cam_count_val is None:
-                    ch_url = f"http://{ip}/ISAPI/System/Video/inputs/channels"
-                    rc = session.get(ch_url, timeout=5)
-                    if rc.status_code == 200 and rc.text:
-                        cam_count_val = self._parse_hikvision_channels_count(rc.text)
+                    elif sc.status_code == 401:
+                        auth_failed = True
                 if cam_count_val is not None:
                     nvr["camera_count"] = cam_count_val
+
+                # Recording policy and per-channel statuses for Uniview.
+                tracks_url = f"http://{ip}/ISAPI/ContentMgmt/record/tracks"
+                tr = session.get(tracks_url, timeout=6)
+                if tr.status_code == 200 and tr.text:
+                    channel_modes = self._parse_hikvision_record_tracks_channel_modes(tr.text)
+                    rec_configured = self._parse_hikvision_record_tracks_configured_channels(tr.text)
+
+                    if connected_ids and rec_configured:
+                        nvr["recording_count"] = len(set(int(c) for c in connected_ids) & set(int(c) for c in rec_configured))
+                    elif rec_configured:
+                        nvr["recording_count"] = len(rec_configured)
+
+                    channel_total = self._coerce_channel_total(
+                        nvr.get("camera_count"),
+                        connected_ids,
+                        rec_configured,
+                        set(channel_modes.keys()),
+                        one_based=True,
+                    )
+                    nvr["channel_statuses"] = self._build_channel_statuses_from_modes(
+                        channel_total,
+                        channel_modes,
+                        connected_ids=(set(int(c) for c in connected_ids) if connected_ids else None),
+                    )
+                elif tr.status_code == 401:
+                    auth_failed = True
+
+                if auth_failed and nvr.get("recording_count") in (None, "Unknown"):
+                    nvr["camera_count"] = "Auth failed"
+                    nvr["recording_count"] = "Auth failed"
+                    nvr["channel_statuses"] = []
 
                 # recording counting removed
         except Exception:
@@ -2221,3 +2275,44 @@ class MonitorState:
         except Exception:
             return None
         return None
+
+    def _parse_uniview_channel_detail_infos_connected_ids(self, text: str) -> set[int] | None:
+        try:
+            data = json.loads(text)
+            obj = data
+            if isinstance(obj, dict) and "Response" in obj and isinstance(obj["Response"], dict):
+                obj = obj["Response"]
+            if isinstance(obj, dict) and "Data" in obj and isinstance(obj["Data"], dict):
+                obj = obj["Data"]
+            detail = obj.get("DetailInfos") if isinstance(obj, dict) else None
+            if not isinstance(detail, list) or not detail:
+                return None
+
+            ids: set[int] = set()
+            for idx, item in enumerate(detail, start=1):
+                if not isinstance(item, dict):
+                    continue
+                vals = {str(k).lower(): str(v).strip().lower() for k, v in item.items()}
+                online = (
+                    vals.get("status") in {"1", "2", "online", "connected", "true"}
+                    or vals.get("online") in {"1", "true", "online", "connected"}
+                    or vals.get("connectstatus") in {"1", "true", "online", "connected"}
+                )
+                if not online:
+                    continue
+
+                cid = None
+                for key in ("id", "channelid", "channel", "chid"):
+                    raw = item.get(key)
+                    if isinstance(raw, int):
+                        cid = raw
+                        break
+                    if isinstance(raw, str) and raw.strip().isdigit():
+                        cid = int(raw.strip())
+                        break
+                if cid is None:
+                    cid = idx
+                ids.add(int(cid))
+            return ids if ids else None
+        except Exception:
+            return None

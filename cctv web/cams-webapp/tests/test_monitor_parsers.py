@@ -274,5 +274,46 @@ class TestMilesightChannelIdAlignment(unittest.TestCase):
         self.assertEqual(aligned, {1, 2, 3, 4, 5, 6, 7})
 
 
+class TestUniviewParsers(unittest.TestCase):
+    def setUp(self):
+        self.m = MonitorState.__new__(MonitorState)
+
+    def test_uniview_detailinfos_connected_ids(self):
+        text = json.dumps({
+            "Response": {
+                "Data": {
+                    "DetailInfos": [
+                        {"ChannelID": 1, "Status": 1},
+                        {"ChannelID": 2, "Status": 0},
+                        {"ChannelID": 3, "Online": True},
+                        {"ChannelID": 4, "ConnectStatus": "1"},
+                    ]
+                }
+            }
+        })
+        ids = self.m._parse_uniview_channel_detail_infos_connected_ids(text)
+        self.assertEqual(ids, {1, 3, 4})
+
+    def test_uniview_detailinfos_camera_count_from_status(self):
+        text = json.dumps({
+            "Response": {
+                "Data": {
+                    "DetailInfos": [
+                        {"ChannelID": 1, "Status": 1},
+                        {"ChannelID": 2, "Status": 0},
+                        {"ChannelID": 3, "Status": 1},
+                    ]
+                }
+            }
+        })
+        cc = self.m._parse_uniview_channel_detail_infos_camera_count(text)
+        self.assertEqual(cc, 2)
+
+    def test_uniview_detailinfos_camera_count_nums_fallback(self):
+        text = json.dumps({"Response": {"Data": {"Nums": 8}}})
+        cc = self.m._parse_uniview_channel_detail_infos_camera_count(text)
+        self.assertEqual(cc, 8)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,12 +2,15 @@
 setlocal
 REM Change to this script's directory
 cd /d "%~dp0"
+echo [Cams Launcher v2] File: %~f0
 
-REM Configure host/port (edit if needed)
-set "HOST=127.0.0.1"
+REM Configure bind host/port (edit if needed)
+set "LAN_HOST=192.168.17.10"
+REM Bind directly to LAN_HOST so Uvicorn shows your LAN IP in startup logs.
+set "BIND_HOST=%LAN_HOST%"
 set "PORT=8000"
 set "APP_DIR=%~dp0cams-webapp"
-set "URL=http://%HOST%:%PORT%/"
+set "URL=http://%LAN_HOST%:%PORT%/"
 
 REM Prefer project virtualenv if present
 if exist ".venv\Scripts\python.exe" (
@@ -25,8 +28,46 @@ if exist ".venv\Scripts\python.exe" (
 )
 
 echo Starting Cams WebApp on %URL%
-start "Cams WebApp Server" %PY% -m uvicorn app.main:app --host %HOST% --port %PORT% --app-dir "%APP_DIR%"
+echo LAN access enabled on port %PORT% (bound to %BIND_HOST%).
 
-powershell -NoProfile -Command "$url='%URL%'; $deadline=(Get-Date).AddSeconds(20); do { try { Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 | Out-Null; Start-Process $url; exit 0 } catch { Start-Sleep -Milliseconds 500 } } while ((Get-Date) -lt $deadline); Start-Process $url"
+REM Stop any stale server already using this port, so old instances do not serve old pages.
+powershell -NoProfile -Command "$p=%PORT%; $conns=Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue; if ($conns) { $procIds = $conns | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($procId in $procIds) { try { Stop-Process -Id $procId -Force -ErrorAction Stop; Write-Host ('Stopped stale process PID ' + $procId + ' on port ' + $p) } catch {} } }"
+
+start "Cams WebApp Server" %PY% -m uvicorn app.main:app --host %BIND_HOST% --port %PORT% --app-dir "%APP_DIR%"
+
+powershell -NoProfile -Command "$url='%URL%'; $deadline=(Get-Date).AddSeconds(25); do { try { Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 | Out-Null; break } catch { Start-Sleep -Milliseconds 500 } } while ((Get-Date) -lt $deadline)"
+
+REM Open browser (try several methods for reliability across Windows setups).
+set "OPENED=0"
+
+powershell -NoProfile -Command "try { Start-Process '%URL%' -ErrorAction Stop; exit 0 } catch { exit 1 }"
+if not errorlevel 1 set "OPENED=1"
+
+if "%OPENED%"=="0" (
+  start "" "%URL%"
+  if not errorlevel 1 set "OPENED=1"
+)
+
+if "%OPENED%"=="0" (
+  explorer "%URL%"
+  if not errorlevel 1 set "OPENED=1"
+)
+
+if "%OPENED%"=="0" (
+  rundll32 url.dll,FileProtocolHandler "%URL%"
+  if not errorlevel 1 set "OPENED=1"
+)
+
+if "%OPENED%"=="0" if exist "%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe" (
+  start "" "%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe" "%URL%"
+  if not errorlevel 1 set "OPENED=1"
+)
+
+if "%OPENED%"=="0" if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" (
+  start "" "%ProgramFiles%\Google\Chrome\Application\chrome.exe" "%URL%"
+  if not errorlevel 1 set "OPENED=1"
+)
+
+if "%OPENED%"=="0" echo Could not auto-open browser. Open this URL manually: %URL%
 
 endlocal

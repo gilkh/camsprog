@@ -1,694 +1,978 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>NVR Uptime/Downtime Calendar</title>
-    <style>
-      :root {
-        --primary: #2563eb;
-        --primary-hover: #1d4ed8;
-        --success: #10b981;
-        --warning: #f59e0b;
-        --danger: #ef4444;
-        --bg: #f1f5f9;
-        --card: #ffffff;
-        --text: #1e293b;
-        --text-muted: #64748b;
-        --border: #e2e8f0;
-        --radius: 12px;
-        --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.05);
-        --shadow-hover: 0 4px 6px rgba(0,0,0,0.1), 0 10px 20px rgba(0,0,0,0.08);
-      }
-      * { box-sizing: border-box; }
-      body {
-        font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-        margin: 0;
-        background: var(--bg);
-        color: var(--text);
-        line-height: 1.5;
-      }
-      header {
-        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-        color: #fff;
-        padding: 16px 24px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-      }
-      header h1 {
-        font-size: 22px;
-        margin: 0;
-        font-weight: 600;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-      }
-      .actions { display: flex; gap: 12px; align-items: center; }
-      .btn-back, .btn-settings {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        color: #e2e8f0;
-        text-decoration: none;
-        padding: 10px 16px;
-        border: 1px solid #334155;
-        border-radius: var(--radius);
-        transition: all 0.2s;
-        font-weight: 500;
-        font-size: 14px;
-      }
-      .btn-back:hover, .btn-settings:hover { background: #334155; border-color: #475569; }
 
-      main {
-        max-width: 1400px;
-        margin: 0 auto;
-        padding: 24px;
-      }
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="NVR Uptime & Downtime heatmap calendar — Cams WebApp" />
+  <title>Uptime Calendar — Cams WebApp</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📹</text></svg>" />
+  <style>
+    /* ═══  Calendar-specific styles  ═══ */
 
-      /* Control Panel */
-      .control-panel {
-        background: var(--card);
-        border-radius: var(--radius);
-        padding: 24px;
-        box-shadow: var(--shadow);
-        border: 1px solid var(--border);
-        margin-bottom: 24px;
-      }
-      .control-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-        gap: 24px;
-        align-items: end;
-      }
-      .control-section h3 {
-        font-size: 14px;
-        font-weight: 600;
-        color: var(--text);
-        margin: 0 0 12px 0;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-      .date-range-display {
-        background: linear-gradient(135deg, #dbeafe 0%, #eff6ff 100%);
-        border: 1.5px solid #93c5fd;
-        border-radius: 10px;
-        padding: 12px 16px;
-        font-size: 15px;
-        font-weight: 500;
-        color: #1e40af;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-      }
-      .quick-presets {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-      }
-      .preset-btn {
-        padding: 8px 14px;
-        border: 1.5px solid var(--border);
-        background: #fff;
-        border-radius: 8px;
-        font-size: 13px;
-        font-weight: 500;
-        cursor: pointer;
-        transition: all 0.2s;
-        color: var(--text);
-      }
-      .preset-btn:hover {
-        border-color: var(--primary);
-        color: var(--primary);
-        background: #eff6ff;
-      }
-      .preset-btn.active {
-        background: var(--primary);
-        border-color: var(--primary);
-        color: white;
-      }
-      .date-inputs {
-        display: flex;
-        gap: 12px;
-        align-items: center;
-      }
-      .date-input-group {
-        flex: 1;
-      }
-      .date-input-group label {
-        display: block;
-        font-size: 12px;
-        font-weight: 500;
-        color: var(--text-muted);
-        margin-bottom: 6px;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-      }
-      .date-input-group input {
-        width: 100%;
-        padding: 10px 12px;
-        border: 1.5px solid var(--border);
-        border-radius: 8px;
-        font-size: 14px;
-        font-family: inherit;
-        transition: all 0.2s;
-      }
-      .date-input-group input:focus {
-        outline: none;
-        border-color: var(--primary);
-        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-      }
-      .date-separator {
-        color: var(--text-muted);
-        font-size: 14px;
-        padding-bottom: 8px;
-      }
-      .btn-load {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        gap: 8px;
-        padding: 10px 20px;
-        background: var(--primary);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        font-size: 14px;
-        font-weight: 500;
-        cursor: pointer;
-        transition: all 0.2s;
-        height: fit-content;
-      }
-      .btn-load:hover { background: var(--primary-hover); }
+    /* ── Control Panel ── */
+    .controls-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      padding: 20px 24px;
+      margin-bottom: 20px;
+      display: grid;
+      grid-template-columns: 1fr 1fr 1.3fr;
+      gap: 24px;
+      align-items: end;
+    }
 
-      /* Filter & Legend */
+    .control-group h3 {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .range-display {
+      background: var(--accent-glow);
+      border: 1px solid rgba(99, 102, 241, 0.15);
+      border-radius: var(--radius-sm);
+      padding: 10px 16px;
+      color: var(--accent-primary-hover);
+      font-weight: 600;
+      font-size: 0.857rem;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .preset-bar {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .preset-btn {
+      padding: 8px 16px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-medium);
+      background: transparent;
+      color: var(--text-secondary);
+      font-family: inherit;
+      font-size: 0.857rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all var(--transition-fast);
+    }
+
+    .preset-btn:hover {
+      border-color: var(--accent-primary);
+      color: var(--accent-primary-hover);
+      background: var(--accent-glow);
+    }
+
+    .preset-btn.active {
+      background: var(--accent-primary);
+      color: white;
+      border-color: var(--accent-primary);
+      box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+    }
+
+    .custom-range-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    .custom-range-row .field {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .custom-range-row .field label {
+      font-size: 0.714rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+    }
+
+    .custom-range-row input[type="date"] {
+      padding: 8px 12px;
+      border: 1px solid var(--border-medium);
+      border-radius: var(--radius-sm);
+      font-family: inherit;
+      font-size: 0.857rem;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      transition: all var(--transition-fast);
+      color-scheme: dark;
+    }
+
+    .custom-range-row input[type="date"]:focus {
+      outline: none;
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    .arrow-sep {
+      color: var(--text-muted);
+      font-size: 1.1rem;
+      padding-bottom: 8px;
+    }
+
+    .btn-load {
+      padding: 8px 20px;
+      background: linear-gradient(135deg, var(--accent-primary) 0%, #7c3aed 100%);
+      color: white;
+      border: none;
+      border-radius: var(--radius-sm);
+      font-family: inherit;
+      font-size: 0.857rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all var(--transition-fast);
+      box-shadow: 0 2px 8px rgba(99, 102, 241, 0.25);
+      white-space: nowrap;
+    }
+
+    .btn-load:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
+    }
+
+    /* ── Toolbar ── */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .legend-card {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 10px 18px;
+    }
+
+    .legend-label {
+      font-size: 0.714rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+    }
+
+    .legend-gradient {
+      width: 140px;
+      height: 10px;
+      border-radius: 5px;
+      background: linear-gradient(to right, #22c55e, #eab308, #ef4444);
+      border: 1px solid var(--border-subtle);
+    }
+
+    .legend-ends {
+      display: flex;
+      justify-content: space-between;
+      width: 140px;
+      margin-top: 2px;
+    }
+
+    .legend-ends span {
+      font-size: 0.643rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .legend-ends .lo {
+      color: var(--accent-green);
+    }
+
+    .legend-ends .hi {
+      color: var(--accent-red);
+    }
+
+    /* ── Calendar Grid ── */
+    .calendar-scroll {
+      overflow: auto;
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      background: var(--bg-card);
+      box-shadow: var(--shadow-md);
+    }
+
+    .calendar-wrapper {
+      display: inline-block;
+      min-width: 100%;
+    }
+
+    .calendar-row {
+      display: grid;
+    }
+
+    .calendar-row.header {
+      background: rgba(255, 255, 255, 0.02);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    .cell {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border-subtle);
+      border-right: 1px solid var(--border-subtle);
+      font-size: 0.786rem;
+    }
+
+    .cell.name {
+      background: var(--bg-card-solid);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      position: sticky;
+      left: 0;
+      z-index: 5;
+      box-shadow: 1px 0 0 var(--border-subtle);
+      color: var(--text-secondary);
+      font-weight: 500;
+      transition: background var(--transition-fast), color var(--transition-fast);
+    }
+
+    .cell.name.active {
+      background: rgba(99, 102, 241, 0.08);
+      color: var(--text-primary);
+    }
+
+    .calendar-row.header .cell {
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.714rem;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+      text-align: center;
+      background: var(--bg-card-solid);
+    }
+
+    .calendar-row.header .cell.name {
+      color: var(--text-muted);
+    }
+
+    .calendar-row.header .cell.day.active {
+      background: rgba(99, 102, 241, 0.08);
+      color: var(--accent-primary-hover);
+    }
+
+    .cell.day {
+      min-width: 100px;
+      cursor: pointer;
+      color: var(--text-primary);
+      white-space: pre-line;
+      position: relative;
+      text-align: center;
+      transition: all var(--transition-fast);
+    }
+
+    .cell.day:hover {
+      filter: brightness(1.3);
+      box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.25) !important;
+    }
+
+    .calendar-row:not(.header) .cell.day {
+      /* we fill the background from JS */
+    }
+
+    /* ── NVR Name + Uptime ── */
+    .nvr-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow: hidden;
+    }
+
+    .nvr-label .nvr-name-text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 500;
+      color: var(--text-primary);
+      font-size: 0.786rem;
+    }
+
+    .nvr-label .nvr-ip-text {
+      font-size: 0.714rem;
+      color: var(--text-muted);
+      font-family: 'Inter', monospace;
+    }
+
+    .uptime-badge {
+      display: inline-flex;
+      padding: 2px 8px;
+      border-radius: 100px;
+      font-size: 0.679rem;
+      font-weight: 700;
+      flex-shrink: 0;
+      margin-left: auto;
+    }
+
+    .uptime-badge.high {
+      background: var(--accent-green-soft);
+      color: var(--accent-green);
+    }
+
+    .uptime-badge.medium {
+      background: var(--accent-amber-soft);
+      color: var(--accent-amber);
+    }
+
+    .uptime-badge.low {
+      background: var(--accent-red-soft);
+      color: var(--accent-red);
+    }
+
+    /* ── Day Cell Content ── */
+    .day-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+    }
+
+    .day-downtime {
+      font-size: 0.714rem;
+      font-weight: 600;
+      color: rgba(255, 255, 255, 0.85);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    }
+
+    .day-hours {
+      font-size: 0.643rem;
+      color: rgba(255, 255, 255, 0.55);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    }
+
+    /* ── Modal ── */
+    .calendar-modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      animation: fadeIn var(--transition-medium) ease;
+    }
+
+    .calendar-modal {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-medium);
+      border-radius: var(--radius-xl);
+      padding: 28px;
+      width: 90%;
+      max-width: 480px;
+      box-shadow: var(--shadow-lg);
+      animation: slideUp var(--transition-slow) ease;
+    }
+
+    .calendar-modal h3 {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 6px;
+    }
+
+    .calendar-modal .modal-date {
+      font-size: 0.857rem;
+      color: var(--text-muted);
+      margin-bottom: 18px;
+    }
+
+    .calendar-modal .timeline {
+      margin: 0 0 20px 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .calendar-modal .timeline li {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border-subtle);
+      font-size: 0.857rem;
+      color: var(--text-secondary);
+    }
+
+    .calendar-modal .timeline li:last-child {
+      border-bottom: none;
+    }
+
+    .calendar-modal .timeline .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-red);
+      flex-shrink: 0;
+    }
+
+    .calendar-modal .timeline .dur {
+      margin-left: auto;
+      font-weight: 600;
+      color: var(--accent-amber);
+      font-size: 0.786rem;
+    }
+
+    .calendar-modal .no-downtime {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 14px;
+      border-radius: var(--radius-sm);
+      background: var(--accent-green-soft);
+      color: var(--accent-green);
+      font-weight: 500;
+      font-size: 0.857rem;
+    }
+
+    .calendar-modal button {
+      background: var(--bg-glass);
+      color: var(--text-secondary);
+      border: 1px solid var(--border-medium);
+      padding: 9px 0;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      width: 100%;
+      font-family: inherit;
+      font-size: 0.857rem;
+      font-weight: 500;
+      transition: all var(--transition-fast);
+    }
+
+    .calendar-modal button:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+
+    /* ── Summary row ── */
+    .summary-strip {
+      display: flex;
+      gap: 20px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+
+    .summary-chip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      font-size: 0.857rem;
+    }
+
+    .summary-chip .chip-val {
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .summary-chip .chip-label {
+      color: var(--text-muted);
+      font-size: 0.786rem;
+    }
+
+    /* ── Page title ── */
+    .page-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .page-title h2 {
+      font-size: 1.3rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text-primary);
+      margin: 0;
+    }
+
+    .page-title .subtitle {
+      font-size: 0.857rem;
+      color: var(--text-muted);
+      font-weight: 400;
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 1024px) {
+      .controls-card {
+        grid-template-columns: 1fr;
+        gap: 16px;
+      }
+    }
+
+    @media (max-width: 640px) {
       .toolbar {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 20px;
-        margin-bottom: 16px;
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .custom-range-row {
         flex-wrap: wrap;
       }
-      .filter-section {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-      }
-      .filter-section label {
-        font-size: 14px;
-        font-weight: 500;
-        color: var(--text);
-      }
-      .filter-input-wrapper {
-        position: relative;
-        display: flex;
-        align-items: center;
-      }
-      .filter-input-wrapper svg {
-        position: absolute;
-        left: 12px;
-        color: var(--text-muted);
-        pointer-events: none;
-      }
-      .filter-input-wrapper input {
-        padding: 10px 12px 10px 38px;
-        border: 1.5px solid var(--border);
-        border-radius: 8px;
-        font-size: 14px;
-        width: 260px;
-        transition: all 0.2s;
-      }
-      .filter-input-wrapper input:focus {
-        outline: none;
-        border-color: var(--primary);
-        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-      }
-      .legend-box {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        background: var(--card);
-        padding: 12px 16px;
-        border-radius: 10px;
-        border: 1px solid var(--border);
-        box-shadow: var(--shadow);
-      }
-      .legend-title {
-        font-size: 13px;
-        font-weight: 600;
-        color: var(--text);
-      }
-      .legend-scale {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
-      .legend-gradient {
-        width: 120px;
-        height: 12px;
-        border-radius: 6px;
-        background: linear-gradient(to right, rgb(0,180,80), rgb(100,120,80), rgb(200,0,80));
-        border: 1px solid #d1d5db;
-      }
-      .legend-labels {
-        display: flex;
-        justify-content: space-between;
-        width: 120px;
-        font-size: 11px;
-        color: var(--text-muted);
-        margin-top: 2px;
-      }
+    }
+  </style>
+</head>
 
-      /* Calendar */
-      .calendar-scroll { overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
-      .calendar-wrapper { display: inline-block; min-width: 100%; background: var(--card); }
-      .calendar-row { display: grid; }
-      .calendar-row.header { background: #f8fafc; font-weight: 600; position: sticky; top: 0; z-index: 10; }
-      .cell { padding: 10px; border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); }
-      .cell.name { background: #f8fafc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: sticky; left: 0; z-index: 5; box-shadow: 1px 0 0 var(--border); font-size: 13px; }
-      .cell.name.active { background: #dbeafe; }
-      .cell.day { min-width: 90px; cursor: pointer; color: var(--text); white-space: nowrap; position: relative; background: #ffffff; font-size: 12px; }
-      .cell.day:hover { box-shadow: inset 0 0 0 2px #94a3b8; }
-      .calendar-row.header .cell.day.active { background: #dbeafe; }
-      .calendar-row:nth-child(odd) .cell.day { background: #f8fafc; }
-      .leg-box { width:20px; height:12px; display:inline-block; border:1px solid #d1d5db; border-radius:2px; }
+<body>
+  <header>
+    <h1>Cams Dashboard</h1>
+    <div class="actions">
+      <a href="/">◧ Dashboard</a>
+      <a href="/settings">⚙ Settings</a>
+    </div>
+  </header>
 
-      @media (max-width: 768px) {
-        .control-grid { grid-template-columns: 1fr; }
-        .toolbar { flex-direction: column; align-items: stretch; }
-        .filter-input-wrapper input { width: 100%; }
-        .legend-box { justify-content: center; }
-        .date-inputs { flex-direction: column; align-items: stretch; }
-        .date-separator { display: none; }
-        main { padding: 16px; }
-        .quick-presets { justify-content: center; }
-        .cell.day { min-width: 70px; }
-      }
-    </style>
-  </head>
-  <body>
-    <header>
-      <h1>
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
-          <line x1="16" y1="2" x2="16" y2="6"></line>
-          <line x1="8" y1="2" x2="8" y2="6"></line>
-          <line x1="3" y1="10" x2="21" y2="10"></line>
-        </svg>
-        NVR Uptime/Downtime Calendar
-      </h1>
-      <div class="actions">
-        <a href="/" class="btn-back">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
-            <polyline points="9 22 9 12 15 12 15 22"></polyline>
-          </svg>
-          Dashboard
-        </a>
-        <a href="/settings" class="btn-settings">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
-            <circle cx="12" cy="12" r="3"></circle>
-          </svg>
-          Settings
-        </a>
-      </div>
-    </header>
+  <main>
+    <div class="page-title">
+      <h2>📅 Uptime Calendar</h2>
+      <span class="subtitle">— NVR uptime & downtime heatmap</span>
+    </div>
 
-    <main>
-      <!-- Control Panel -->
-      <div class="control-panel">
-        <div class="control-grid">
-          <!-- Date Range Display -->
-          <div class="control-section">
-            <h3>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10"></circle>
-                <polyline points="12 6 12 12 16 14"></polyline>
-              </svg>
-              Selected Range
-            </h3>
-            <div class="date-range-display" id="range-info">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink: 0;">
-                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
-                <line x1="16" y1="2" x2="16" y2="6"></line>
-                <line x1="8" y1="2" x2="8" y2="6"></line>
-                <line x1="3" y1="10" x2="21" y2="10"></line>
-              </svg>
-              <span id="range-text">Loading...</span>
-            </div>
-          </div>
-
-          <!-- Quick Presets -->
-          <div class="control-section">
-            <h3>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10"></circle>
-                <polyline points="12 6 12 12 16 14"></polyline>
-              </svg>
-              Quick Presets
-            </h3>
-            <div class="quick-presets">
-              <button class="preset-btn active" data-days="7">Last 7 Days</button>
-              <button class="preset-btn" data-days="14">Last 14 Days</button>
-              <button class="preset-btn" data-days="30">Last 30 Days</button>
-              <button class="preset-btn" data-days="90">Last 3 Months</button>
-            </div>
-          </div>
-
-          <!-- Custom Date Range -->
-          <div class="control-section">
-            <h3>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
-                <line x1="16" y1="2" x2="16" y2="6"></line>
-                <line x1="8" y1="2" x2="8" y2="6"></line>
-                <line x1="3" y1="10" x2="21" y2="10"></line>
-              </svg>
-              Custom Range
-            </h3>
-            <div style="display: flex; gap: 12px; align-items: flex-end;">
-              <div class="date-inputs" style="flex: 1;">
-                <div class="date-input-group">
-                  <label>From Date</label>
-                  <input type="date" id="from-date" />
-                </div>
-                <span class="date-separator">→</span>
-                <div class="date-input-group">
-                  <label>To Date</label>
-                  <input type="date" id="to-date" />
-                </div>
-              </div>
-              <button class="btn-load" id="load-range">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
-                  <path d="M3 3v5h5"></path>
-                  <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"></path>
-                  <path d="M16 16h5v5"></path>
-                </svg>
-                Load
-              </button>
-            </div>
-          </div>
+    <!-- Control Panel -->
+    <div class="controls-card">
+      <!-- Selected Range -->
+      <div class="control-group">
+        <h3>📆 Selected Range</h3>
+        <div class="range-display">
+          <span id="range-text">Loading…</span>
         </div>
       </div>
 
-      <!-- Filter & Legend Toolbar -->
-      <div class="toolbar">
-        <div class="filter-section">
-          <label>Filter NVRs:</label>
-          <div class="filter-input-wrapper">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="11" cy="11" r="8"></circle>
-              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-            </svg>
-            <input type="text" id="nvr-filter" placeholder="Search by name or IP..." />
-          </div>
-        </div>
-        <div class="legend-box" title="Color scale shows downtime percentage per day">
-          <span class="legend-title">Downtime Heatmap</span>
-          <div>
-            <div class="legend-scale">
-              <span style="font-size: 12px; color: #22c55e; font-weight: 500;">0%</span>
-              <div class="legend-gradient"></div>
-              <span style="font-size: 12px; color: #ef4444; font-weight: 500;">100%</span>
-            </div>
-            <div class="legend-labels">
-              <span>Online</span>
-              <span>Offline</span>
-            </div>
-          </div>
+      <!-- Quick Presets -->
+      <div class="control-group">
+        <h3>⚡ Quick Presets</h3>
+        <div class="preset-bar">
+          <button class="preset-btn active" data-days="7">7 Days</button>
+          <button class="preset-btn" data-days="14">14 Days</button>
+          <button class="preset-btn" data-days="30">30 Days</button>
+          <button class="preset-btn" data-days="90">90 Days</button>
         </div>
       </div>
 
-      <div id="calendar-container" class="calendar-scroll"></div>
-    </main>
-    <script>
-      function fmtDate(d) {
-        return d.toISOString().slice(0,10);
-      }
-      function toEpoch(d) {
-        return Math.floor(d.getTime() / 1000);
-      }
-      function startOfDay(d) {
-        const x = new Date(d);
-        x.setHours(0,0,0,0);
-        return x;
-      }
-      function endOfDay(d) {
-        const x = new Date(d);
-        x.setHours(23,59,59,999);
-        return x;
-      }
+      <!-- Custom Range -->
+      <div class="control-group">
+        <h3>🎯 Custom Range</h3>
+        <div class="custom-range-row">
+          <div class="field">
+            <label>From</label>
+            <input type="date" id="from-date" />
+          </div>
+          <span class="arrow-sep">→</span>
+          <div class="field">
+            <label>To</label>
+            <input type="date" id="to-date" />
+          </div>
+          <button id="load-range" class="btn-load">Load</button>
+        </div>
+      </div>
+    </div>
 
-      function defaultRange() {
-        const to = new Date();
-        const from = new Date();
-        from.setDate(from.getDate() - 6);
-        return { from, to };
-      }
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <input type="text" id="nvr-filter" class="search-input" placeholder="Search NVRs…" style="width:260px;" />
 
-      function setRangeInputs(from, to) {
-        const f = document.getElementById('from-date');
-        const t = document.getElementById('to-date');
-        f.value = fmtDate(from);
-        t.value = fmtDate(to);
-        const rangeText = document.getElementById('range-text');
-        const fromStr = from.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-        const toStr = to.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-        rangeText.textContent = `${fromStr} → ${toStr}`;
-      }
+      <div class="legend-card">
+        <span class="legend-label">Downtime</span>
+        <div>
+          <div class="legend-gradient"></div>
+          <div class="legend-ends">
+            <span class="lo">0 %</span>
+            <span class="hi">100 %</span>
+          </div>
+        </div>
+      </div>
+    </div>
 
-      function applyPreset(days) {
-        const to = new Date();
-        const from = new Date();
-        from.setDate(from.getDate() - (days - 1));
-        return { from, to };
-      }
+    <!-- Summary -->
+    <div class="summary-strip" id="summary-strip">
+      <div class="summary-chip">
+        <span class="chip-val" id="sum-total">—</span>
+        <span class="chip-label">NVRs</span>
+      </div>
+      <div class="summary-chip">
+        <span class="chip-val" id="sum-perfect" style="color:var(--accent-green)">—</span>
+        <span class="chip-label">100 % uptime</span>
+      </div>
+      <div class="summary-chip">
+        <span class="chip-val" id="sum-issues" style="color:var(--accent-amber)">—</span>
+        <span class="chip-label">Had downtime</span>
+      </div>
+      <div class="summary-chip">
+        <span class="chip-val" id="sum-avg">—</span>
+        <span class="chip-label">Avg uptime</span>
+      </div>
+    </div>
 
-      async function loadNvrs() {
-        const res = await fetch('/api/nvrs');
-        return await res.json();
-      }
+    <!-- Calendar -->
+    <div id="calendar-container" class="calendar-scroll">
+      <!-- skeleton -->
+      <div style="padding:40px;text-align:center;">
+        <div class="skeleton" style="height:20px;width:70%;margin:12px auto;"></div>
+        <div class="skeleton" style="height:20px;width:85%;margin:12px auto;"></div>
+        <div class="skeleton" style="height:20px;width:60%;margin:12px auto;"></div>
+      </div>
+    </div>
+  </main>
 
-      async function loadEvents(from, to) {
-        const q = new URLSearchParams({ from: String(toEpoch(from)), to: String(toEpoch(to)) });
-        const res = await fetch(`/api/events?${q.toString()}`);
-        return await res.json();
-      }
+  <script>
+    /* ───────── Helpers ───────── */
+    function fmtDate(d) {
+      return d.toISOString().slice(0, 10);
+    }
+    function toEpoch(d) {
+      return Math.floor(d.getTime() / 1000);
+    }
+    function startOfDay(d) {
+      const x = new Date(d);
+      x.setHours(0, 0, 0, 0);
+      return x;
+    }
+    function endOfDay(d) {
+      const x = new Date(d);
+      x.setHours(23, 59, 59, 999);
+      return x;
+    }
+    function defaultRange() {
+      const to = new Date();
+      const from = new Date();
+      from.setDate(from.getDate() - 6);
+      return { from, to };
+    }
 
-      function buildDays(from, to) {
-        const days = [];
-        const cur = new Date(startOfDay(from));
-        const end = endOfDay(to);
-        while (cur <= end) {
-          days.push(new Date(cur));
-          cur.setDate(cur.getDate() + 1);
+    function setRangeInputs(from, to) {
+      document.getElementById('from-date').value = fmtDate(from);
+      document.getElementById('to-date').value = fmtDate(to);
+      const rangeText = document.getElementById('range-text');
+      const opts = { month: 'short', day: 'numeric', year: 'numeric' };
+      rangeText.textContent = `${from.toLocaleDateString(undefined, opts)}  →  ${to.toLocaleDateString(undefined, opts)}`;
+    }
+
+    function applyPreset(days) {
+      const to = new Date();
+      const from = new Date();
+      from.setDate(from.getDate() - (days - 1));
+      return { from, to };
+    }
+
+    async function loadNvrs() {
+      const res = await fetch('/api/nvrs');
+      return await res.json();
+    }
+
+    async function loadEvents(from, to) {
+      const q = new URLSearchParams({ from: String(toEpoch(from)), to: String(toEpoch(to)) });
+      const res = await fetch(`/api/events?${q.toString()}`);
+      return await res.json();
+    }
+
+    function buildDays(from, to) {
+      const days = [];
+      const cur = new Date(startOfDay(from));
+      const end = endOfDay(to);
+      while (cur <= end) {
+        days.push(new Date(cur));
+        cur.setDate(cur.getDate() + 1);
+      }
+      return days;
+    }
+
+    function computeDailyDowntime(dayStart, dayEnd, offlineIntervals) {
+      let total = 0;
+      for (const iv of offlineIntervals) {
+        const s = new Date(iv.start * 1000);
+        const e = new Date((iv.end ?? Math.floor(Date.now() / 1000)) * 1000);
+        const overlapStart = new Date(Math.max(s.getTime(), dayStart.getTime()));
+        const overlapEnd = new Date(Math.min(e.getTime(), dayEnd.getTime()));
+        const durMs = overlapEnd - overlapStart;
+        if (durMs > 0) total += durMs;
+      }
+      const dayMs = dayEnd - dayStart;
+      const ratio = dayMs > 0 ? total / dayMs : 0;
+      return { millis: total, ratio };
+    }
+
+    /* Color for downtime ratio — green → yellow → red */
+    function colorForRatio(r) {
+      const c = Math.max(0, Math.min(1, r));
+      if (c === 0) return 'rgba(34,197,94,0.12)';
+      // green→yellow→red
+      if (c < 0.5) {
+        const t = c * 2;
+        const red = Math.round(34 + (234 - 34) * t);
+        const green = Math.round(197 + (179 - 197) * t);
+        const blue = Math.round(94 + (8 - 94) * t);
+        return `rgba(${red},${green},${blue},${0.25 + 0.35 * t})`;
+      } else {
+        const t = (c - 0.5) * 2;
+        const red = Math.round(234 + (239 - 234) * t);
+        const green = Math.round(179 + (68 - 179) * t);
+        const blue = Math.round(8 + (68 - 8) * t);
+        return `rgba(${red},${green},${blue},${0.6 + 0.25 * t})`;
+      }
+    }
+
+    function uptimeClass(pct) {
+      if (pct >= 99.5) return 'high';
+      if (pct >= 90) return 'medium';
+      return 'low';
+    }
+
+    /* ───────── Render Calendar ───────── */
+    function renderCalendar(nvrs, events, days) {
+      const container = document.getElementById('calendar-container');
+      container.innerHTML = '';
+      const wrapper = document.createElement('div');
+      wrapper.className = 'calendar-wrapper';
+
+      const colDef = `240px repeat(${days.length}, 1fr)`;
+
+      // Header row
+      const headerRow = document.createElement('div');
+      headerRow.className = 'calendar-row header';
+      headerRow.style.gridTemplateColumns = colDef;
+      const nameHeader = document.createElement('div');
+      nameHeader.className = 'cell name';
+      nameHeader.textContent = 'NVR';
+      headerRow.appendChild(nameHeader);
+      const headerDayCells = [];
+      for (let i = 0; i < days.length; i++) {
+        const d = days[i];
+        const c = document.createElement('div');
+        c.className = 'cell day';
+        const wk = d.toLocaleDateString(undefined, { weekday: 'short' });
+        const dt = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        c.innerHTML = `<div>${wk}</div><div style="font-weight:700;font-size:0.786rem;color:var(--text-secondary);">${dt}</div>`;
+        headerRow.appendChild(c);
+        headerDayCells.push(c);
+      }
+      wrapper.appendChild(headerRow);
+
+      // Filter
+      const filter = (document.getElementById('nvr-filter').value || '').toLowerCase();
+      const filteredNvrs = nvrs.filter(n => {
+        const txt = ((n.name || '') + ' ' + (n.ip || '')).toLowerCase();
+        return !filter || txt.includes(filter);
+      });
+
+      // Stats
+      let perfectCount = 0;
+      let issueCount = 0;
+      let uptimeSum = 0;
+
+      for (const nvr of filteredNvrs) {
+        const row = document.createElement('div');
+        row.className = 'calendar-row';
+        row.style.gridTemplateColumns = colDef;
+        const nameCell = document.createElement('div');
+        nameCell.className = 'cell name';
+        const offline = (events[nvr.ip] || []).filter(x => x.type === 'offline');
+        const totalMs = (endOfDay(days[days.length - 1]) - startOfDay(days[0]));
+        let totalDownMs = 0;
+        for (let j = 0; j < days.length; j++) {
+          const d = days[j];
+          const dayStart = startOfDay(d);
+          const dayEnd = endOfDay(d);
+          const { millis } = computeDailyDowntime(dayStart, dayEnd, offline);
+          totalDownMs += millis;
         }
-        return days;
-      }
+        const uptimePct = totalMs > 0 ? Math.max(0, 100 * (1 - (totalDownMs / totalMs))) : 100;
+        uptimeSum += uptimePct;
+        if (uptimePct >= 99.99) perfectCount++;
+        else issueCount++;
 
-      function computeDailyDowntime(dayStart, dayEnd, offlineIntervals) {
-        let total = 0;
-        for (const iv of offlineIntervals) {
-          const s = new Date(iv.start * 1000);
-          const e = new Date((iv.end ?? Math.floor(Date.now()/1000)) * 1000);
-          const overlapStart = new Date(Math.max(s.getTime(), dayStart.getTime()));
-          const overlapEnd = new Date(Math.min(e.getTime(), dayEnd.getTime()));
-          const durMs = overlapEnd - overlapStart;
-          if (durMs > 0) total += durMs;
-        }
-        const dayMs = dayEnd - dayStart;
-        const ratio = dayMs > 0 ? total / dayMs : 0;
-        return { millis: total, ratio };
-      }
+        nameCell.innerHTML = `
+          <div class="nvr-label">
+            <div>
+              <div class="nvr-name-text">${nvr.name || ''}</div>
+              <div class="nvr-ip-text">${nvr.ip || ''}</div>
+            </div>
+            <span class="uptime-badge ${uptimeClass(uptimePct)}">${uptimePct.toFixed(1)}%</span>
+          </div>
+        `;
+        row.appendChild(nameCell);
 
-      function colorForRatio(r) {
-        const c = Math.max(0, Math.min(1, r));
-        const hue = 120 - Math.round(120 * c);
-        return `hsl(${hue}, 90%, 45%)`;
-      }
-
-      function renderCalendar(nvrs, events, days) {
-        const container = document.getElementById('calendar-container');
-        container.innerHTML = '';
-        const wrapper = document.createElement('div');
-        wrapper.className = 'calendar-wrapper';
-
-        const headerRow = document.createElement('div');
-        headerRow.className = 'calendar-row header';
-        headerRow.style.gridTemplateColumns = `220px repeat(${days.length}, 1fr)`;
-        const nameHeader = document.createElement('div');
-        nameHeader.className = 'cell name';
-        nameHeader.textContent = 'NVR (uptime %)';
-        headerRow.appendChild(nameHeader);
-        const headerDayCells = [];
-        for (let i = 0; i < days.length; i++) {
-          const d = days[i];
+        for (let j = 0; j < days.length; j++) {
+          const d = days[j];
+          const dayStart = startOfDay(d);
+          const dayEnd = endOfDay(d);
+          const { millis, ratio } = computeDailyDowntime(dayStart, dayEnd, offline);
           const c = document.createElement('div');
           c.className = 'cell day';
-          const wk = d.toLocaleDateString(undefined, { weekday: 'short' });
-          const dt = d.toLocaleDateString();
-          c.textContent = `${wk}\n${dt}`;
-          headerRow.appendChild(c);
-          headerDayCells.push(c);
-        }
-        wrapper.appendChild(headerRow);
+          c.title = `${d.toLocaleDateString()} — downtime ${(millis / 3600000).toFixed(2)}h`;
 
-        const filter = (document.getElementById('nvr-filter').value || '').toLowerCase();
-        const filteredNvrs = nvrs.filter(n => {
-          const txt = ((n.name || '') + ' ' + (n.ip || '')).toLowerCase();
-          return !filter || txt.includes(filter);
-        });
-        for (const nvr of filteredNvrs) {
-          const row = document.createElement('div');
-          row.className = 'calendar-row';
-          row.style.gridTemplateColumns = `220px repeat(${days.length}, 1fr)`;
-          const nameCell = document.createElement('div');
-          nameCell.className = 'cell name';
-          const offline = (events[nvr.ip] || []).filter(x => x.type === 'offline');
-          const totalMs = (endOfDay(days[days.length-1]) - startOfDay(days[0]));
-          let totalDownMs = 0;
-          for (let j = 0; j < days.length; j++) {
-            const d = days[j];
-            const dayStart = startOfDay(d);
-            const dayEnd = endOfDay(d);
-            const { millis } = computeDailyDowntime(dayStart, dayEnd, offline);
-            totalDownMs += millis;
+          c.style.background = colorForRatio(ratio);
+
+          if (millis > 0) {
+            const pctDown = (ratio * 100).toFixed(0);
+            const hrs = (millis / 3600000);
+            let durStr;
+            if (hrs < 1) durStr = Math.round(millis / 60000) + 'm';
+            else durStr = hrs.toFixed(1) + 'h';
+            c.innerHTML = `<div class="day-content"><span class="day-downtime">${pctDown}%</span><span class="day-hours">${durStr}</span></div>`;
+          } else {
+            c.innerHTML = `<div class="day-content"><span style="color:var(--accent-green);font-size:0.786rem;font-weight:600;">✓</span></div>`;
           }
-          const uptimePct = totalMs > 0 ? Math.max(0, 100 * (1 - (totalDownMs / totalMs))) : 100;
-          nameCell.textContent = `${nvr.name || ''} (${nvr.ip}) — ${uptimePct.toFixed(1)}%`;
-          row.appendChild(nameCell);
-          for (let j = 0; j < days.length; j++) {
-            const d = days[j];
-            const dayStart = startOfDay(d);
-            const dayEnd = endOfDay(d);
-            const { millis, ratio } = computeDailyDowntime(dayStart, dayEnd, offline);
-            const c = document.createElement('div');
-            c.className = 'cell day';
-            c.title = `${d.toLocaleDateString()} — downtime ${(millis/3600000).toFixed(2)}h`;
-            const outlineColor = millis === 0 ? '#d1d5db' : colorForRatio(ratio);
-            const outlineW = millis === 0 ? 2 : 3;
-            c.style.boxShadow = `inset 0 0 0 ${outlineW}px ${outlineColor}`;
-            c.addEventListener('mouseenter', () => {
-              nameCell.classList.add('active');
-              headerDayCells[j].classList.add('active');
-            });
-            c.addEventListener('mouseleave', () => {
-              nameCell.classList.remove('active');
-              headerDayCells[j].classList.remove('active');
-            });
-            c.addEventListener('click', () => showDayDetail(nvr, dayStart, dayEnd, offline));
-            row.appendChild(c);
-          }
-          wrapper.appendChild(row);
+
+          c.addEventListener('mouseenter', () => {
+            nameCell.classList.add('active');
+            headerDayCells[j].classList.add('active');
+          });
+          c.addEventListener('mouseleave', () => {
+            nameCell.classList.remove('active');
+            headerDayCells[j].classList.remove('active');
+          });
+          c.addEventListener('click', () => showDayDetail(nvr, dayStart, dayEnd, offline));
+          row.appendChild(c);
         }
-        container.appendChild(wrapper);
+        wrapper.appendChild(row);
+      }
+      container.appendChild(wrapper);
+
+      // Update summary
+      document.getElementById('sum-total').textContent = filteredNvrs.length;
+      document.getElementById('sum-perfect').textContent = perfectCount;
+      document.getElementById('sum-issues').textContent = issueCount;
+      const avg = filteredNvrs.length > 0 ? (uptimeSum / filteredNvrs.length).toFixed(1) + '%' : '—';
+      document.getElementById('sum-avg').textContent = avg;
+    }
+
+    /* ───────── Day Detail Modal ───────── */
+    function showDayDetail(nvr, dayStart, dayEnd, offlineIntervals) {
+      const overlay = document.createElement('div');
+      overlay.className = 'calendar-modal-overlay';
+      const modal = document.createElement('div');
+      modal.className = 'calendar-modal';
+
+      const h = document.createElement('h3');
+      h.textContent = `${nvr.name || ''} — ${nvr.ip || ''}`;
+      const dateP = document.createElement('div');
+      dateP.className = 'modal-date';
+      dateP.textContent = dayStart.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+
+      const items = [];
+      for (const iv of offlineIntervals) {
+        const s = new Date(iv.start * 1000);
+        const e = new Date((iv.end ?? Math.floor(Date.now() / 1000)) * 1000);
+        if (e < dayStart || s > dayEnd) continue;
+        const start = new Date(Math.max(s.getTime(), dayStart.getTime()));
+        const end = new Date(Math.min(e.getTime(), dayEnd.getTime()));
+        const durMs = end - start;
+        if (durMs <= 0) continue;
+        items.push({ start, end, durMs });
+      }
+      items.sort((a, b) => a.start - b.start);
+
+      let content;
+      if (items.length === 0) {
+        content = document.createElement('div');
+        content.className = 'no-downtime';
+        content.textContent = '✓  No downtime on this day';
+      } else {
+        const ul = document.createElement('ul');
+        ul.className = 'timeline';
+        for (const it of items) {
+          const li = document.createElement('li');
+          const dot = document.createElement('span');
+          dot.className = 'dot';
+          const timeSpan = document.createElement('span');
+          timeSpan.textContent = `${it.start.toLocaleTimeString()} → ${it.end.toLocaleTimeString()}`;
+          const dur = document.createElement('span');
+          dur.className = 'dur';
+          const mins = Math.round(it.durMs / 60000);
+          dur.textContent = mins >= 60 ? (it.durMs / 3600000).toFixed(1) + 'h' : mins + 'min';
+          li.appendChild(dot);
+          li.appendChild(timeSpan);
+          li.appendChild(dur);
+          ul.appendChild(li);
+        }
+        content = ul;
       }
 
-      function showDayDetail(nvr, dayStart, dayEnd, offlineIntervals) {
-        const overlay = document.createElement('div');
-        overlay.className = 'modal-overlay';
-        const modal = document.createElement('div');
-        modal.className = 'modal';
-        const h = document.createElement('h3');
-        h.textContent = `${nvr.name || ''} (${nvr.ip}) — ${dayStart.toLocaleDateString()}`;
-        const list = document.createElement('div');
-        const items = [];
-        for (const iv of offlineIntervals) {
-          const s = new Date(iv.start * 1000);
-          const e = new Date((iv.end ?? Math.floor(Date.now()/1000)) * 1000);
-          if (e < dayStart || s > dayEnd) continue;
-          const start = new Date(Math.max(s.getTime(), dayStart.getTime()));
-          const end = new Date(Math.min(e.getTime(), dayEnd.getTime()));
-          const durMs = end - start;
-          if (durMs <= 0) continue;
-          items.push({ start, end, durMs });
-        }
-        items.sort((a,b) => a.start - b.start);
-        if (items.length === 0) {
-          list.textContent = 'No downtime intervals for this day.';
-        } else {
-          const ul = document.createElement('ul');
-          for (const it of items) {
-            const li = document.createElement('li');
-            li.textContent = `${it.start.toLocaleTimeString()} → ${it.end.toLocaleTimeString()}  (${(it.durMs/60000).toFixed(0)} min)`;
-            ul.appendChild(li);
-          }
-          list.appendChild(ul);
-        }
-        const close = document.createElement('button');
-        close.textContent = 'Close';
-        close.addEventListener('click', () => { document.body.removeChild(overlay); });
-        modal.appendChild(h);
-        modal.appendChild(list);
-        modal.appendChild(close);
-        overlay.appendChild(modal);
-        document.body.appendChild(overlay);
-      }
+      const close = document.createElement('button');
+      close.textContent = 'Close';
+      close.addEventListener('click', () => { document.body.removeChild(overlay); });
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) document.body.removeChild(overlay); });
 
-      async function init() {
-        const { from, to } = defaultRange();
+      modal.appendChild(h);
+      modal.appendChild(dateP);
+      modal.appendChild(content);
+      modal.appendChild(close);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+    }
+
+    /* ───────── Init ───────── */
+    async function init() {
+      const { from, to } = defaultRange();
+      setRangeInputs(from, to);
+      let nvrs = await loadNvrs();
+      let events = await loadEvents(from, to);
+      let days = buildDays(from, to);
+      renderCalendar(nvrs, events, days);
+
+      // Load button
+      document.getElementById('load-range').addEventListener('click', async () => {
+        const fromInput = document.getElementById('from-date').value;
+        const toInput = document.getElementById('to-date').value;
+        if (!fromInput || !toInput) return;
+        const from = new Date(fromInput + 'T00:00:00');
+        const to = new Date(toInput + 'T23:59:59');
         setRangeInputs(from, to);
-        let nvrs = await loadNvrs();
-        let events = await loadEvents(from, to);
-        let days = buildDays(from, to);
+        nvrs = await loadNvrs();
+        events = await loadEvents(from, to);
+        days = buildDays(from, to);
         renderCalendar(nvrs, events, days);
+      });
 
-        // Load button handler
-        document.getElementById('load-range').addEventListener('click', async () => {
-          const fromInput = document.getElementById('from-date').value;
-          const toInput = document.getElementById('to-date').value;
-          if (!fromInput || !toInput) return;
-          const from = new Date(fromInput + 'T00:00:00');
-          const to = new Date(toInput + 'T23:59:59');
+      // Quick presets
+      document.querySelectorAll('.preset-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          const daysCount = parseInt(btn.dataset.days, 10);
+          const { from, to } = applyPreset(daysCount);
           setRangeInputs(from, to);
           nvrs = await loadNvrs();
           events = await loadEvents(from, to);
           days = buildDays(from, to);
           renderCalendar(nvrs, events, days);
         });
+      });
 
-        // Quick preset handlers
-        document.querySelectorAll('.preset-btn').forEach(btn => {
-          btn.addEventListener('click', async () => {
-            document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            const daysCount = parseInt(btn.dataset.days, 10);
-            const { from, to } = applyPreset(daysCount);
-            setRangeInputs(from, to);
-            nvrs = await loadNvrs();
-            events = await loadEvents(from, to);
-            days = buildDays(from, to);
-            renderCalendar(nvrs, events, days);
-          });
-        });
+      // Filter
+      document.getElementById('nvr-filter').addEventListener('input', () => {
+        renderCalendar(nvrs, events, days);
+      });
+    }
 
-        document.getElementById('nvr-filter').addEventListener('input', () => {
-          renderCalendar(nvrs, events, days);
-        });
-      }
+    window.addEventListener('DOMContentLoaded', init);
+  </script>
+</body>
 
-      window.addEventListener('DOMContentLoaded', init);
-    </script>
-    <style>
-      .calendar-scroll { overflow: auto; border: 1px solid #e5e7eb; border-radius: 8px; }
-      .calendar-wrapper { display: inline-block; min-width: 100%; }
-      .calendar-row { display: grid; }
-      .calendar-row.header { background: #f9fafb; font-weight: 600; position: sticky; top: 0; z-index: 10; }
-      .cell { padding: 8px; border-bottom: 1px solid #f3f4f6; border-right: 1px solid #f3f4f6; }
-      .cell.name { background: #f9fafb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: sticky; left: 0; z-index: 5; box-shadow: 1px 0 0 #e5e7eb; }
-      .cell.name.active { background: #e6f0ff; }
-      .cell.day { min-width: 90px; cursor: pointer; color: #111827; white-space: nowrap; position: relative; background: #ffffff; }
-      .cell.day:hover { box-shadow: inset 0 0 0 2px #9ca3af; }
-      .calendar-row.header .cell.day.active { background: #e6f0ff; }
-      .calendar-row:nth-child(odd) .cell.day { background: #fbfbfc; }
-      .calendar-toolbar { display:flex; align-items:center; justify-content: space-between; margin-bottom:8px; gap:12px; }
-      .legend { display:flex; align-items:center; gap:6px; color:#6b7280; }
-      .leg-box { width:20px; height:12px; display:inline-block; border:1px solid #d1d5db; border-radius:2px; }
-    </style>
-  </body>
 </html>

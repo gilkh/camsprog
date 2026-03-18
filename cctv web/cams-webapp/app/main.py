@@ -394,22 +394,58 @@ def api_sync_time(ip: str):
     username = nvr.get("username") or "admin"
     password = nvr.get("password") or "admin"
     now = datetime.now().astimezone()
+
+    def hikvision_timezone(ts: datetime) -> str:
+        # Hikvision expects CST offset with inverted sign convention.
+        offset = ts.utcoffset()
+        total_minutes = int(offset.total_seconds() // 60) if offset is not None else 0
+        abs_minutes = abs(total_minutes)
+        hh = abs_minutes // 60
+        mm = abs_minutes % 60
+        sign = "-" if total_minutes >= 0 else "+"
+        return f"CST{sign}{hh}:{mm:02d}:00"
+
     try:
-        if vendor == "Milesight":
+        if vendor in ("Milesight", "Milesight Old"):
             ts = now.strftime("%Y-%m-%d %H:%M:%S")
             url = f"http://{ip}/sdk.cgi?action=set.system.time&manual_time={requests.utils.quote(ts)}"
             r = requests.get(url, auth=(username, password), timeout=6)
             ok = r.status_code == 200
-        else:
+        elif vendor == "Hikvision":
             iso = now.isoformat(timespec="seconds")
+            tz = hikvision_timezone(now)
             body = f"""
 <Time>
+  <timeMode>manual</timeMode>
   <localTime>{iso}</localTime>
+  <timeZone>{tz}</timeZone>
 </Time>
 """.strip()
             url = f"http://{ip}/ISAPI/System/time"
             r = requests.put(url, data=body.encode("utf-8"), headers={"Content-Type": "application/xml"}, auth=HTTPDigestAuth(username, password), timeout=8)
             ok = 200 <= r.status_code < 300
+        elif vendor == "Uniview":
+            iso = now.isoformat(timespec="seconds")
+            url = f"http://{ip}/ISAPI/System/time"
+            payloads = [
+                f"<Time><localTime>{iso}</localTime></Time>",
+                f"<Time><timeMode>manual</timeMode><localTime>{iso}</localTime><timeZone>{hikvision_timezone(now)}</timeZone></Time>",
+            ]
+            r = None
+            ok = False
+            for body in payloads:
+                r = requests.put(
+                    url,
+                    data=body.encode("utf-8"),
+                    headers={"Content-Type": "application/xml"},
+                    auth=HTTPDigestAuth(username, password),
+                    timeout=8,
+                )
+                if 200 <= r.status_code < 300:
+                    ok = True
+                    break
+        else:
+            return JSONResponse({"status": "error", "message": "Unsupported vendor for sync"}, status_code=400)
         if ok:
             monitor.refresh_once()
             return {"status": "ok"}
