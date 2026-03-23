@@ -22,6 +22,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.json")
 STATE_PATH = os.path.join(PROJECT_ROOT, "state.json")
 EVENTS_PATH = os.path.join(PROJECT_ROOT, "events.json")
+HEARTBEAT_PATH = os.path.join(PROJECT_ROOT, "heartbeat.json")
 
 
 def load_nvrs_from_config() -> List[Dict[str, Any]]:
@@ -70,6 +71,7 @@ class MonitorState:
         self.thread: threading.Thread | None = None
         self.nvrs: List[Dict[str, Any]] = []
         self.db = db
+        self._first_heartbeat_ts: float | None = None  # timestamp when monitoring first started tracking
 
     def load(self):
         if self.db is not None:
@@ -97,11 +99,177 @@ class MonitorState:
             nvr.setdefault("recording_count", "Unknown")
             nvr.setdefault("recording_expected", None)
             nvr.setdefault("channel_statuses", [])
+        # --- Heartbeat: detect system-off gap and record unknown intervals ---
+        self._init_heartbeat()
 
     def get_snapshot(self) -> List[Dict[str, Any]]:
         with self.lock:
             # Return a shallow copy safe for JSON
             return [dict(nvr) for nvr in self.nvrs]
+
+    def _init_heartbeat(self):
+        """On startup, read last heartbeat.  If there is a gap > 2× poll_interval,
+        record that gap as an 'unknown' interval for every NVR (system was off)."""
+        now_ts = int(time.time())
+        last_hb = self._read_heartbeat()
+        if last_hb is not None and isinstance(last_hb, (int, float)):
+            gap = now_ts - int(last_hb)
+            # Only treat as a real gap if > 2× poll interval (otherwise it is just normal jitter)
+            threshold = max(self.poll_interval * 2, 180)
+            if gap > threshold:
+                gap_start = int(last_hb)
+                self._record_unknown_gap(gap_start, now_ts)
+                self._finalize_stale_offline_before_gap(gap_start)
+        # Record the first-ever heartbeat if not set
+        if self._first_heartbeat_ts is None:
+            stored_first = self._read_first_heartbeat()
+            if stored_first is not None:
+                self._first_heartbeat_ts = stored_first
+            else:
+                self._first_heartbeat_ts = now_ts
+                self._write_first_heartbeat(now_ts)
+        self._write_heartbeat(now_ts)
+
+    def _finalize_stale_offline_before_gap(self, gap_start: int) -> None:
+        """Split stale offline state around a restart gap.
+
+        If a device was marked Offline before shutdown, keep only the observed part
+        as offline (offline_since -> gap_start), and force post-restart status to
+        Unknown so the next refresh starts a fresh offline interval.
+        """
+        for nvr in self.nvrs:
+            if nvr.get("status") != "Offline":
+                continue
+            ip = nvr.get("ip")
+            off_start = nvr.get("offline_since")
+            if ip and isinstance(off_start, (int, float)):
+                off_start_i = int(off_start)
+                if off_start_i < gap_start:
+                    self._record_offline_interval(ip, off_start_i, gap_start)
+            nvr["status"] = "Unknown"
+            nvr["offline_since"] = None
+            nvr["nvr_time"] = "Unknown"
+            nvr["camera_count"] = "Unknown"
+            nvr["recording_count"] = "Unknown"
+            nvr["channel_statuses"] = []
+
+    def _read_heartbeat(self) -> float | None:
+        """Read the last heartbeat timestamp from file or DB."""
+        try:
+            if self.db is not None:
+                doc = self.db["system_meta"].find_one({"_id": "heartbeat"})
+                if doc:
+                    return doc.get("last_time")
+                return None
+            if os.path.exists(HEARTBEAT_PATH):
+                with open(HEARTBEAT_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return data.get("last_time") if isinstance(data, dict) else None
+        except Exception:
+            pass
+        return None
+
+    def _write_heartbeat(self, ts: float) -> None:
+        """Persist heartbeat timestamp."""
+        try:
+            if self.db is not None:
+                self.db["system_meta"].update_one(
+                    {"_id": "heartbeat"},
+                    {"$set": {"last_time": int(ts)}},
+                    upsert=True,
+                )
+                return
+            tmp = HEARTBEAT_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"last_time": int(ts)}, f)
+            os.replace(tmp, HEARTBEAT_PATH)
+        except Exception:
+            pass
+
+    def _read_first_heartbeat(self) -> float | None:
+        """Read the first-ever heartbeat (monitoring start) timestamp."""
+        try:
+            if self.db is not None:
+                doc = self.db["system_meta"].find_one({"_id": "first_heartbeat"})
+                if doc:
+                    return doc.get("ts")
+                return None
+            if os.path.exists(HEARTBEAT_PATH):
+                with open(HEARTBEAT_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return data.get("first_time") if isinstance(data, dict) else None
+        except Exception:
+            pass
+        return None
+
+    def _write_first_heartbeat(self, ts: float) -> None:
+        """Persist the first-ever heartbeat timestamp."""
+        try:
+            if self.db is not None:
+                self.db["system_meta"].update_one(
+                    {"_id": "first_heartbeat"},
+                    {"$set": {"ts": int(ts)}},
+                    upsert=True,
+                )
+                return
+            # Merge into the heartbeat file
+            data = {}
+            if os.path.exists(HEARTBEAT_PATH):
+                try:
+                    with open(HEARTBEAT_PATH, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data["first_time"] = int(ts)
+            tmp = HEARTBEAT_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, HEARTBEAT_PATH)
+        except Exception:
+            pass
+
+    def _record_unknown_gap(self, gap_start: int, gap_end: int) -> None:
+        """Record a system-off gap as 'unknown' event for every known NVR IP."""
+        ips = [nvr.get("ip") for nvr in self.nvrs if nvr.get("ip")]
+        for ip in ips:
+            try:
+                if self.db is not None:
+                    self.db["nvr_events"].insert_one({
+                        "ip": ip,
+                        "type": "unknown",
+                        "start": gap_start,
+                        "end": gap_end,
+                    })
+                else:
+                    events = {}
+                    if os.path.exists(EVENTS_PATH):
+                        try:
+                            with open(EVENTS_PATH, "r", encoding="utf-8") as f:
+                                events = json.load(f)
+                        except Exception:
+                            events = {}
+                    if not isinstance(events, dict):
+                        events = {}
+                    arr = events.get(ip)
+                    if not isinstance(arr, list):
+                        arr = []
+                    arr.append({"type": "unknown", "start": gap_start, "end": gap_end})
+                    events[ip] = arr
+                    tmp = EVENTS_PATH + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(events, f, ensure_ascii=False, separators=(",", ":"))
+                    os.replace(tmp, EVENTS_PATH)
+            except Exception:
+                pass
+
+    def get_calendar_meta(self) -> dict:
+        """Return metadata for the calendar page."""
+        return {
+            "status": "ok",
+            "baseline_ts": self._first_heartbeat_ts,
+        }
 
     def start(self):
         if self.running:
@@ -195,6 +363,8 @@ class MonitorState:
 
         # Persist fast to separate state file (avoid rewriting config.json each refresh)
         self._write_state()
+        # Update heartbeat so we can detect system-off gaps
+        self._write_heartbeat(now_ts)
 
     def _write_back(self):
         try:
@@ -265,8 +435,9 @@ class MonitorState:
         out: Dict[str, List[Dict[str, Any]]] = {}
         try:
             if self.db is not None:
+                # Fetch both offline and unknown events
                 cur = self.db["nvr_events"].find({
-                    "type": "offline",
+                    "type": {"$in": ["offline", "unknown"]},
                     "$or": [
                         {"start": {"$lte": to_ts}, "end": {"$gte": from_ts}},
                         {"start": {"$gte": from_ts, "$lte": to_ts}},
@@ -279,7 +450,8 @@ class MonitorState:
                     arr = out.get(ip)
                     if not isinstance(arr, list):
                         arr = []
-                    arr.append({"type": "offline", "start": int(doc.get("start", 0)), "end": int(doc.get("end", to_ts))})
+                    ev_type = doc.get("type", "offline")
+                    arr.append({"type": ev_type, "start": int(doc.get("start", 0)), "end": int(doc.get("end", to_ts))})
                     out[ip] = arr
             else:
                 if os.path.exists(EVENTS_PATH):
@@ -293,7 +465,8 @@ class MonitorState:
                             if not isinstance(arr, list):
                                 continue
                             for ev in arr:
-                                if ev.get("type") != "offline":
+                                ev_type = ev.get("type")
+                                if ev_type not in ("offline", "unknown"):
                                     continue
                                 s = int(ev.get("start", 0))
                                 e = int(ev.get("end", to_ts))
@@ -301,7 +474,7 @@ class MonitorState:
                                     lst = out.get(ip)
                                     if not isinstance(lst, list):
                                         lst = []
-                                    lst.append({"type": "offline", "start": s, "end": e})
+                                    lst.append({"type": ev_type, "start": s, "end": e})
                                     out[ip] = lst
             # include currently offline intervals as open-ended
             with self.lock:

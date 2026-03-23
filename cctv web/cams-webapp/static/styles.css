@@ -362,6 +362,25 @@ main {
   align-items: center;
 }
 
+.btn-export-csv {
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  text-decoration: none;
+  font-size: 0.857rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: all var(--transition-fast);
+}
+
+.btn-export-csv:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
 .search-input {
   background: var(--bg-glass);
   border: 1px solid var(--border-medium);
@@ -935,6 +954,16 @@ a.ip-link:focus-visible {
 
   .table-card {
     overflow-x: auto;
+  }
+
+  .table-header {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .table-header-actions {
+    width: 100%;
+    justify-content: space-between;
   }
 
   table {

@@ -499,6 +499,87 @@ class TestPingIp(unittest.TestCase):
         self.assertIn("2000", call_args)
 
 
+class TestMonitorHeartbeatGapHandling(unittest.TestCase):
+    """Regression tests for restart-gap classification between offline and unknown."""
+
+    @patch("app.monitor.time.time", return_value=2600)
+    @patch.object(MonitorState, "_read_heartbeat", return_value=2000)
+    @patch.object(MonitorState, "_read_first_heartbeat", return_value=1200)
+    @patch.object(MonitorState, "_write_first_heartbeat")
+    @patch.object(MonitorState, "_write_heartbeat")
+    @patch.object(MonitorState, "_record_unknown_gap")
+    @patch.object(MonitorState, "_record_offline_interval")
+    def test_reboot_gap_splits_offline_and_marks_unknown(
+        self,
+        mock_record_offline,
+        mock_record_unknown,
+        mock_write_hb,
+        mock_write_first,
+        mock_read_first,
+        mock_read_hb,
+        mock_time,
+    ):
+        monitor = MonitorState(poll_interval=60, db=None)
+        monitor.nvrs = [
+            {
+                "name": "NVR1",
+                "ip": "192.168.1.10",
+                "status": "Offline",
+                "offline_since": 1000,
+                "nvr_time": "Offline",
+                "camera_count": "Offline",
+                "recording_count": "Offline",
+                "channel_statuses": [1],
+            }
+        ]
+
+        monitor._init_heartbeat()
+
+        mock_record_unknown.assert_called_once_with(2000, 2600)
+        mock_record_offline.assert_called_once_with("192.168.1.10", 1000, 2000)
+        self.assertEqual(monitor.nvrs[0]["status"], "Unknown")
+        self.assertIsNone(monitor.nvrs[0]["offline_since"])
+        self.assertEqual(monitor.nvrs[0]["nvr_time"], "Unknown")
+        self.assertEqual(monitor.nvrs[0]["camera_count"], "Unknown")
+        self.assertEqual(monitor.nvrs[0]["recording_count"], "Unknown")
+        self.assertEqual(monitor.nvrs[0]["channel_statuses"], [])
+        mock_write_hb.assert_called_once_with(2600)
+        mock_write_first.assert_not_called()
+
+    @patch("app.monitor.time.time", return_value=2100)
+    @patch.object(MonitorState, "_read_heartbeat", return_value=2000)
+    @patch.object(MonitorState, "_read_first_heartbeat", return_value=1200)
+    @patch.object(MonitorState, "_write_heartbeat")
+    @patch.object(MonitorState, "_record_unknown_gap")
+    @patch.object(MonitorState, "_record_offline_interval")
+    def test_no_restart_gap_keeps_existing_offline_interval(
+        self,
+        mock_record_offline,
+        mock_record_unknown,
+        mock_write_hb,
+        mock_read_first,
+        mock_read_hb,
+        mock_time,
+    ):
+        monitor = MonitorState(poll_interval=60, db=None)
+        monitor.nvrs = [
+            {
+                "name": "NVR1",
+                "ip": "192.168.1.10",
+                "status": "Offline",
+                "offline_since": 1000,
+            }
+        ]
+
+        monitor._init_heartbeat()
+
+        mock_record_unknown.assert_not_called()
+        mock_record_offline.assert_not_called()
+        self.assertEqual(monitor.nvrs[0]["status"], "Offline")
+        self.assertEqual(monitor.nvrs[0]["offline_since"], 1000)
+        mock_write_hb.assert_called_once_with(2100)
+
+
 class TestMonitorStateAddOrUpdateNvr(unittest.TestCase):
     """Test adding and updating NVRs with field normalization."""
 

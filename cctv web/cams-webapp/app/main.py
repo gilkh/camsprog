@@ -1,6 +1,8 @@
 import os
 import json
 import html
+import csv
+import io
 import threading
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse, Response
@@ -136,7 +138,6 @@ def _get_merged_settings() -> dict:
         merged["smtp_host_2"] = merged.get("smtp_server_2")
 
     merged["smtp_to"] = _normalize_smtp_to(merged.get("smtp_to"))
-    merged["email_enabled"] = _as_bool(merged.get("email_enabled"), default=True)
     return merged
 
 
@@ -145,22 +146,6 @@ def _parse_int(value):
         return int(value)
     except Exception:
         return None
-
-
-def _as_bool(value, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "yes", "on", "enabled"}:
-            return True
-        if lowered in {"0", "false", "no", "off", "disabled"}:
-            return False
-    return bool(value)
 
 
 def _get_smtp_targets(settings: dict, mode: str = "auto") -> list[tuple[str, int]]:
@@ -317,36 +302,27 @@ def _build_alert_email_content(due_alerts: list[dict], generated_at_ts: int) -> 
 
                 sev_bg = "#fef2f2"
                 sev_fg = "#991b1b"
-                sev_border = "#fecaca"
                 if sev == "warning":
                         sev_bg = "#fff7ed"
                         sev_fg = "#9a3412"
-                        sev_border = "#fed7aa"
                 elif sev == "non-critical":
                         sev_bg = "#f1f5f9"
                         sev_fg = "#334155"
-                        sev_border = "#e2e8f0"
 
                 row_html.append(
                         """
                         <tr>
-                            <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle;font-size:13px;color:#334155;text-align:center;">{idx}</td>
-                            <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle;">
-                                <span style="display:inline-block;padding:4px 10px;border-radius:6px;font-weight:600;font-size:11px;letter-spacing:0.02em;background:{sev_bg};color:{sev_fg};border:1px solid {sev_border};">{sev_label}</span>
-                            </td>
-                            <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle;">
-                                <div style="font-size:14px;font-weight:600;color:#0f172a;">{nvr_name}</div>
-                                <div style="color:#64748b;font-size:12px;margin-top:2px;">{nvr_ip}</div>
-                            </td>
-                            <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle;font-size:13px;font-weight:500;color:#0f172a;">{alert_type}</td>
-                            <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle;font-size:13px;color:#475569;text-align:center;">{channel_label}</td>
-                            <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle;font-size:13px;color:#334155;line-height:1.5;">{message}</td>
+                            <td style=\"padding:12px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;font-size:13px;color:#0f172a;\">{idx}</td>
+                            <td style=\"padding:12px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;\"><span style=\"display:inline-block;padding:4px 8px;border-radius:999px;font-weight:700;font-size:11px;letter-spacing:0.03em;background:{sev_bg};color:{sev_fg};\">{sev_label}</span></td>
+                            <td style=\"padding:12px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;font-size:13px;color:#0f172a;\">{nvr_name}<div style=\"color:#64748b;font-size:12px;margin-top:2px;\">{nvr_ip}</div></td>
+                            <td style=\"padding:12px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;font-size:13px;color:#0f172a;\">{alert_type}</td>
+                            <td style=\"padding:12px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;font-size:13px;color:#0f172a;\">{channel_label}</td>
+                            <td style=\"padding:12px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top;font-size:13px;color:#0f172a;\">{message}</td>
                         </tr>
                         """.format(
                                 idx=idx,
                                 sev_bg=sev_bg,
                                 sev_fg=sev_fg,
-                                sev_border=sev_border,
                                 sev_label=html.escape(sev_label),
                                 nvr_name=html.escape(nvr_name),
                                 nvr_ip=html.escape(nvr_ip),
@@ -373,61 +349,73 @@ def _build_alert_email_content(due_alerts: list[dict], generated_at_ts: int) -> 
 <!DOCTYPE html>
 <html>
     <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta charset=\"utf-8\" />
+        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
         <title>{subject}</title>
     </head>
-    <body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1e293b;">
-        <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="background:#f1f5f9;padding:40px 16px;">
+    <body style=\"margin:0;padding:0;background:#f8fafc;font-family:Segoe UI,Arial,sans-serif;color:#0f172a;\">
+        <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" style=\"background:#f8fafc;padding:24px 12px;\">
             <tr>
-                <td align="center">
-                    <table role="presentation" cellpadding="0" cellspacing="0" width="800" style="width:100%;max-width:800px;background:#ffffff;border:1px solid #cbd5e1;border-radius:12px;overflow:hidden;box-shadow:0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);">
+                <td align=\"center\">
+                    <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" width=\"760\" style=\"width:100%;max-width:760px;background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;overflow:hidden;\">
                         <tr>
-                            <td style="padding:32px;background:linear-gradient(135deg,#0f172a,#1e3a8a);color:#ffffff;text-align:center;">
-                                <div style="font-size:13px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#93c5fd;margin-bottom:8px;">Cams WebApp Monitor</div>
-                                <h1 style="margin:0;font-size:28px;font-weight:700;line-height:1.2;letter-spacing:-0.02em;">System Alert Summary</h1>
-                                <p style="margin:12px 0 0;font-size:14px;color:#bfdbfe;">Generated at {generated_at}</p>
+                            <td style=\"padding:24px 24px 18px;background:linear-gradient(120deg,#0f172a,#1d4ed8);color:#ffffff;\">
+                                <div style=\"font-size:12px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.9;\">Cams WebApp</div>
+                                <h1 style=\"margin:8px 0 0;font-size:24px;line-height:1.2;\">Active Alert Summary</h1>
+                                <p style=\"margin:10px 0 0;font-size:14px;opacity:0.95;\">Generated at {generated_at}</p>
                             </td>
                         </tr>
                         <tr>
-                            <td style="padding:32px;">
-                                <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#475569;">
-                                    The monitoring system detected conditions requiring attention.
-                                    Please review the list below, resolve the underlying issues, and acknowledge these alerts in the dashboard.
+                            <td style=\"padding:20px 24px 8px;\">
+                                <p style=\"margin:0 0 14px;font-size:14px;line-height:1.6;color:#1e293b;\">
+                                    The monitoring system detected active conditions that may affect camera health, recording continuity, or time accuracy.
+                                    Review the incident list below and acknowledge alerts after investigation.
                                 </p>
-                                <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom:32px;">
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style=\"padding:0 24px 16px;\">
+                                <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\">
                                     <tr>
-                                        <td style="padding:16px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc;text-align:center;">
-                                            <div style="font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">Total Alerts</div>
-                                            <div style="font-size:28px;font-weight:700;color:#0f172a;">{total}</div>
+                                        <td style=\"padding:10px;border:1px solid #e2e8f0;border-radius:10px;background:#f8fafc;text-align:center;\">
+                                            <div style=\"font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.06em;\">Total</div>
+                                            <div style=\"font-size:24px;font-weight:700;color:#0f172a;margin-top:4px;\">{total}</div>
                                         </td>
-                                        <td style="width:12px;"></td>
-                                        <td style="padding:16px;border:1px solid #fecaca;border-radius:8px;background:#fef2f2;text-align:center;">
-                                            <div style="font-size:12px;font-weight:600;color:#991b1b;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">Critical</div>
-                                            <div style="font-size:28px;font-weight:700;color:#7f1d1d;">{critical_count}</div>
+                                        <td style=\"width:8px;\"></td>
+                                        <td style=\"padding:10px;border:1px solid #fee2e2;border-radius:10px;background:#fef2f2;text-align:center;\">
+                                            <div style=\"font-size:11px;color:#991b1b;text-transform:uppercase;letter-spacing:0.06em;\">Critical</div>
+                                            <div style=\"font-size:24px;font-weight:700;color:#7f1d1d;margin-top:4px;\">{critical_count}</div>
                                         </td>
-                                        <td style="width:12px;"></td>
-                                        <td style="padding:16px;border:1px solid #fed7aa;border-radius:8px;background:#fff7ed;text-align:center;">
-                                            <div style="font-size:12px;font-weight:600;color:#9a3412;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">Warning</div>
-                                            <div style="font-size:28px;font-weight:700;color:#7c2d12;">{warning_count}</div>
+                                        <td style=\"width:8px;\"></td>
+                                        <td style=\"padding:10px;border:1px solid #ffedd5;border-radius:10px;background:#fff7ed;text-align:center;\">
+                                            <div style=\"font-size:11px;color:#9a3412;text-transform:uppercase;letter-spacing:0.06em;\">Warning</div>
+                                            <div style=\"font-size:24px;font-weight:700;color:#9a3412;margin-top:4px;\">{warning_count}</div>
                                         </td>
-                                        <td style="width:12px;"></td>
-                                        <td style="padding:16px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc;text-align:center;">
-                                            <div style="font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">Non-critical</div>
-                                            <div style="font-size:28px;font-weight:700;color:#334155;">{non_critical_count}</div>
+                                        <td style=\"width:8px;\"></td>
+                                        <td style=\"padding:10px;border:1px solid #e2e8f0;border-radius:10px;background:#f8fafc;text-align:center;\">
+                                            <div style=\"font-size:11px;color:#334155;text-transform:uppercase;letter-spacing:0.06em;\">Non-critical</div>
+                                            <div style=\"font-size:24px;font-weight:700;color:#334155;margin-top:4px;\">{non_critical_count}</div>
                                         </td>
                                     </tr>
                                 </table>
-                                <h2 style="margin:0 0 16px;font-size:18px;font-weight:600;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:12px;">Incident Details</h2>
-                                <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="border:1px solid #e2e8f0;border-radius:8px;border-collapse:separate;border-spacing:0;background:#ffffff;">
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style=\"padding:0 24px 4px;\">
+                                <h2 style=\"margin:0;font-size:16px;color:#0f172a;\">Incident Details</h2>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style=\"padding:10px 24px 20px;\">
+                                <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" style=\"border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;\">
                                     <thead>
-                                        <tr>
-                                            <th align="center" style="padding:14px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;font-size:12px;font-weight:600;text-transform:uppercase;color:#475569;letter-spacing:0.05em;border-top-left-radius:8px;width:30px;">#</th>
-                                            <th align="left" style="padding:14px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;font-size:12px;font-weight:600;text-transform:uppercase;color:#475569;letter-spacing:0.05em;width:80px;">Severity</th>
-                                            <th align="left" style="padding:14px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;font-size:12px;font-weight:600;text-transform:uppercase;color:#475569;letter-spacing:0.05em;">NVR details</th>
-                                            <th align="left" style="padding:14px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;font-size:12px;font-weight:600;text-transform:uppercase;color:#475569;letter-spacing:0.05em;width:120px;">Issue Type</th>
-                                            <th align="center" style="padding:14px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;font-size:12px;font-weight:600;text-transform:uppercase;color:#475569;letter-spacing:0.05em;width:70px;">Channel</th>
-                                            <th align="left" style="padding:14px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;font-size:12px;font-weight:600;text-transform:uppercase;color:#475569;letter-spacing:0.05em;border-top-right-radius:8px;">Description</th>
+                                        <tr style=\"background:#f1f5f9;\">
+                                            <th align=\"left\" style=\"padding:10px;border-bottom:1px solid #cbd5e1;font-size:12px;text-transform:uppercase;color:#334155;letter-spacing:0.04em;\">#</th>
+                                            <th align=\"left\" style=\"padding:10px;border-bottom:1px solid #cbd5e1;font-size:12px;text-transform:uppercase;color:#334155;letter-spacing:0.04em;\">Severity</th>
+                                            <th align=\"left\" style=\"padding:10px;border-bottom:1px solid #cbd5e1;font-size:12px;text-transform:uppercase;color:#334155;letter-spacing:0.04em;\">NVR</th>
+                                            <th align=\"left\" style=\"padding:10px;border-bottom:1px solid #cbd5e1;font-size:12px;text-transform:uppercase;color:#334155;letter-spacing:0.04em;\">Type</th>
+                                            <th align=\"left\" style=\"padding:10px;border-bottom:1px solid #cbd5e1;font-size:12px;text-transform:uppercase;color:#334155;letter-spacing:0.04em;\">Channel</th>
+                                            <th align=\"left\" style=\"padding:10px;border-bottom:1px solid #cbd5e1;font-size:12px;text-transform:uppercase;color:#334155;letter-spacing:0.04em;\">What Happened</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -437,22 +425,12 @@ def _build_alert_email_content(due_alerts: list[dict], generated_at_ts: int) -> 
                             </td>
                         </tr>
                         <tr>
-                            <td style="padding:0 32px 32px;">
-                                <div style="padding:20px;border-left:4px solid #3b82f6;background:#eff6ff;border-radius:0 8px 8px 0;">
-                                    <h3 style="margin:0 0 10px;font-size:15px;color:#1e3a8a;">Recommended Actions</h3>
-                                    <ul style="margin:0;padding:0 0 0 20px;color:#1e3a8a;font-size:14px;line-height:1.6;">
-                                        <li style="margin-bottom:6px;">Check NVR network connectivity, power state, and ping response.</li>
-                                        <li style="margin-bottom:6px;">Verify recording schedules, disk health metrics, and active channel signals.</li>
-                                        <li style="margin-bottom:0;">Confirm NVR clock synchronization (NTP) and appropriate timezone configuration.</li>
-                                    </ul>
-                                </div>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="padding:24px 32px;background:#f8fafc;border-top:1px solid #e2e8f0;text-align:center;">
-                                <div style="font-size:13px;color:#64748b;">
-                                    This is an automated notification from <strong>Cams WebApp</strong>.<br>
-                                    Please do not reply directly to this email.
+                            <td style=\"padding:0 24px 24px;\">
+                                <div style=\"padding:14px 16px;border:1px solid #dbeafe;background:#eff6ff;border-radius:10px;color:#1e3a8a;font-size:13px;line-height:1.6;\">
+                                    <strong>Recommended actions:</strong><br />
+                                    1) Check NVR connectivity and power/network condition.<br />
+                                    2) Validate recording schedule, disk health, and channel input status.<br />
+                                    3) Confirm NVR clock synchronization and timezone settings.
                                 </div>
                             </td>
                         </tr>
@@ -498,46 +476,38 @@ def _build_test_email_content(generated_at_ts: int, smtp_mode: str, recipient_co
 <!DOCTYPE html>
 <html>
     <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta charset=\"utf-8\" />
+        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
         <title>{subject}</title>
     </head>
-    <body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1e293b;">
-        <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="background:#f1f5f9;padding:40px 16px;">
+    <body style=\"margin:0;padding:0;background:#f8fafc;font-family:Segoe UI,Arial,sans-serif;color:#0f172a;\">
+        <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" style=\"background:#f8fafc;padding:24px 12px;\">
             <tr>
-                <td align="center">
-                    <table role="presentation" cellpadding="0" cellspacing="0" width="600" style="width:100%;max-width:600px;background:#ffffff;border:1px solid #cbd5e1;border-radius:12px;overflow:hidden;box-shadow:0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);">
+                <td align=\"center\">
+                    <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" width=\"680\" style=\"width:100%;max-width:680px;background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;overflow:hidden;\">
                         <tr>
-                            <td style="padding:32px;background:linear-gradient(135deg,#064e3b,#0e7490);color:#ffffff;text-align:center;">
-                                <div style="font-size:13px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#67e8f9;margin-bottom:8px;">Cams WebApp</div>
-                                <h1 style="margin:0;font-size:28px;font-weight:700;line-height:1.2;letter-spacing:-0.02em;">SMTP Test Successful</h1>
-                                <p style="margin:12px 0 0;font-size:14px;color:#a5f3fc;">Generated at {generated_at}</p>
+                            <td style=\"padding:24px;background:linear-gradient(120deg,#0b3b2e,#0e7490);color:#ffffff;\">
+                                <div style=\"font-size:12px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.9;\">Cams WebApp</div>
+                                <h1 style=\"margin:8px 0 0;font-size:24px;line-height:1.2;\">SMTP Test Successful</h1>
+                                <p style=\"margin:10px 0 0;font-size:14px;opacity:0.95;\">Generated at {generated_at}</p>
                             </td>
                         </tr>
                         <tr>
-                            <td style="padding:32px;">
-                                <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#475569;text-align:center;">
+                            <td style=\"padding:20px 24px;\">
+                                <p style=\"margin:0 0 14px;font-size:14px;line-height:1.6;color:#1e293b;\">
                                     This is a test notification to confirm your SMTP configuration is working from Cams WebApp.
                                     No incident is active for this email.
                                 </p>
-                                <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc;border-collapse:collapse;">
+                                <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" style=\"border:1px solid #e2e8f0;border-radius:10px;\">
                                     <tr>
-                                        <td style="padding:16px;border-bottom:1px solid #e2e8f0;font-size:14px;color:#64748b;width:40%;">SMTP Mode</td>
-                                        <td style="padding:16px;border-bottom:1px solid #e2e8f0;font-size:14px;font-weight:600;color:#0f172a;text-transform:capitalize;">{smtp_mode}</td>
+                                        <td style=\"padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;color:#334155;width:45%;\">SMTP mode</td>
+                                        <td style=\"padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;font-weight:600;color:#0f172a;\">{smtp_mode}</td>
                                     </tr>
                                     <tr>
-                                        <td style="padding:16px;font-size:14px;color:#64748b;">Recipient Count</td>
-                                        <td style="padding:16px;font-size:14px;font-weight:600;color:#0f172a;">{recipient_count}</td>
+                                        <td style=\"padding:10px 12px;font-size:13px;color:#334155;\">Recipient count</td>
+                                        <td style=\"padding:10px 12px;font-size:13px;font-weight:600;color:#0f172a;\">{recipient_count}</td>
                                     </tr>
                                 </table>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="padding:24px 32px;background:#f8fafc;border-top:1px solid #e2e8f0;text-align:center;">
-                                <div style="font-size:13px;color:#64748b;">
-                                    This is an automated notification from <strong>Cams WebApp</strong>.<br>
-                                    Please do not reply directly to this email.
-                                </div>
                             </td>
                         </tr>
                     </table>
@@ -783,7 +753,6 @@ def _process_alert_cycle_once():
                     "acknowledged": False,
                     "acknowledged_at": None,
                     "last_emailed_at": None,
-                    "next_email_due_at": now_ts,
                     "resolved_at": None,
                 })
             elif prev.get("status") != "active":
@@ -792,7 +761,6 @@ def _process_alert_cycle_once():
                     "acknowledged": False,
                     "acknowledged_at": None,
                     "last_emailed_at": None,
-                    "next_email_due_at": now_ts,
                     "resolved_at": None,
                 })
             alerts_col.update_one({"_id": alert_id}, {"$set": base_set}, upsert=True)
@@ -808,9 +776,6 @@ def _process_alert_cycle_once():
                 {"$set": {"status": "resolved", "resolved_at": now_ts}},
             )
 
-        if not _as_bool(settings.get("email_enabled"), default=True):
-            return
-
         recipients = _normalize_smtp_to(settings.get("smtp_to"))
         if not recipients:
             return
@@ -818,6 +783,7 @@ def _process_alert_cycle_once():
         interval = _parse_int(settings.get("alert_email_interval_seconds"))
         if interval is None or interval < 30:
             interval = 1800
+        due_before = now_ts - interval
 
         due_alerts = list(
             alerts_col.find(
@@ -825,9 +791,9 @@ def _process_alert_cycle_once():
                     "status": "active",
                     "acknowledged": {"$ne": True},
                     "$or": [
-                        {"next_email_due_at": {"$exists": False}},
-                        {"next_email_due_at": None},
-                        {"next_email_due_at": {"$lte": now_ts}},
+                        {"last_emailed_at": {"$exists": False}},
+                        {"last_emailed_at": None},
+                        {"last_emailed_at": {"$lte": due_before}},
                     ],
                 },
                 {
@@ -856,13 +822,7 @@ def _process_alert_cycle_once():
         alert_ids = [x.get("_id") for x in due_alerts if x.get("_id")]
         alerts_col.update_many(
             {"_id": {"$in": alert_ids}},
-            {
-                "$set": {
-                    "last_emailed_at": now_ts,
-                    "next_email_due_at": now_ts + interval,
-                    "last_email_status": "success" if ok else "failed",
-                }
-            },
+            {"$set": {"last_emailed_at": now_ts, "last_email_status": "success" if ok else "failed"}},
         )
         email_col.insert_one(
             {
@@ -916,6 +876,7 @@ def startup_event():
         daemon=True,
     )
     app.state.alert_thread.start()
+    _process_alert_cycle_once()
 
 
 @app.on_event("shutdown")
@@ -964,6 +925,32 @@ def home(request: Request):
 @app.get("/api/nvrs")
 def api_nvrs():
     return JSONResponse(monitor.get_snapshot())
+
+
+@app.get("/api/nvrs/export")
+def api_nvrs_export():
+    rows = monitor.get_snapshot()
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["name", "ip", "type"])
+
+    for nvr in rows:
+        if not isinstance(nvr, dict):
+            continue
+        writer.writerow([
+            str(nvr.get("name") or ""),
+            str(nvr.get("ip") or ""),
+            str(nvr.get("type") or "Unknown"),
+        ])
+
+    filename = f"nvr_list_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
 
 @app.get("/api/state")
 def api_state():
@@ -1050,7 +1037,6 @@ def api_get_settings():
         s["refresh_interval"] = int(s.get("refresh_interval") or monitor.poll_interval or 60)
         s["smtp_to"] = _normalize_smtp_to(s.get("smtp_to"))
         s["alert_email_interval_seconds"] = int(s.get("alert_email_interval_seconds") or 1800)
-        s["email_enabled"] = _as_bool(s.get("email_enabled"), default=True)
         return JSONResponse(s)
     except Exception:
         return JSONResponse({
@@ -1065,7 +1051,6 @@ def api_get_settings():
             "smtp_from": None,
             "smtp_to": [],
             "alert_email_interval_seconds": 1800,
-            "email_enabled": True,
         })
 
 
@@ -1098,9 +1083,7 @@ def api_set_settings(payload: dict):
             except Exception:
                 update["smtp_port_2"] = None
         if "smtp_tls" in payload:
-            update["smtp_tls"] = _as_bool(payload.get("smtp_tls"), default=False)
-        if "email_enabled" in payload:
-            update["email_enabled"] = _as_bool(payload.get("email_enabled"), default=True)
+            update["smtp_tls"] = bool(payload.get("smtp_tls"))
         if "alert_email_interval_seconds" in payload:
             try:
                 v = int(payload.get("alert_email_interval_seconds"))
@@ -1573,6 +1556,14 @@ def api_events(request: Request):
         return JSONResponse({"status": "error", "message": "Failed to load events"}, status_code=500)
 
 
+@app.get("/api/calendar/meta")
+def api_calendar_meta():
+    try:
+        return JSONResponse(monitor.get_calendar_meta())
+    except Exception:
+        return JSONResponse({"status": "ok", "baseline_ts": None})
+
+
 @app.get("/api/logs")
 def api_logs():
     try:
@@ -1779,9 +1770,6 @@ def api_smtp_test(payload: dict):
         s = dict(file_s)
         if isinstance(db_s, dict):
             s.update(db_s)
-
-        if not _as_bool(s.get("email_enabled"), default=True):
-            return JSONResponse({"status": "error", "message": "Email sending is disabled in settings"}, status_code=400)
 
         to_all_saved = bool(payload.get("to_all_saved"))
         smtp_mode = (payload.get("smtp_mode") or "auto").strip().lower()

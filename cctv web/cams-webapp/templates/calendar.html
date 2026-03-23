@@ -167,42 +167,23 @@
       padding: 10px 18px;
     }
 
-    .legend-label {
-      font-size: 0.714rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--text-muted);
-    }
-
-    .legend-gradient {
-      width: 140px;
-      height: 10px;
-      border-radius: 5px;
-      background: linear-gradient(to right, #22c55e, #eab308, #ef4444);
-      border: 1px solid var(--border-subtle);
-    }
-
-    .legend-ends {
+    .legend-item {
       display: flex;
-      justify-content: space-between;
-      width: 140px;
-      margin-top: 2px;
+      align-items: center;
+      gap: 6px;
     }
 
-    .legend-ends span {
-      font-size: 0.643rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
+    .legend-swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      flex-shrink: 0;
     }
 
-    .legend-ends .lo {
-      color: var(--accent-green);
-    }
-
-    .legend-ends .hi {
-      color: var(--accent-red);
+    .legend-text {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      font-weight: 500;
     }
 
     /* ── Calendar Grid ── */
@@ -276,7 +257,7 @@
     }
 
     .cell.day {
-      min-width: 100px;
+      min-width: 110px;
       cursor: pointer;
       color: var(--text-primary);
       white-space: pre-line;
@@ -286,12 +267,15 @@
     }
 
     .cell.day:hover {
-      filter: brightness(1.3);
-      box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.25) !important;
+      filter: brightness(1.2);
+      box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.2) !important;
     }
 
     .calendar-row:not(.header) .cell.day {
-      /* we fill the background from JS */
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 6px 4px;
     }
 
     /* ── NVR Name + Uptime ── */
@@ -342,25 +326,75 @@
       color: var(--accent-red);
     }
 
-    /* ── Day Cell Content ── */
-    .day-content {
+    /* ── Day Cell Content — stacked bar with percentages ── */
+    .day-cell-inner {
+      display: flex;
+      width: 100%;
+      height: 100%;
+      min-height: 52px;
+      gap: 6px;
+      align-items: stretch;
+    }
+
+    .day-bar {
+      width: 8px;
+      min-width: 8px;
+      border-radius: 4px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column-reverse;
+      flex-shrink: 0;
+    }
+
+    .bar-seg {
+      transition: height 0.3s ease;
+    }
+
+    .day-pcts {
       display: flex;
       flex-direction: column;
+      justify-content: center;
+      gap: 1px;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .pct-row {
+      display: flex;
       align-items: center;
-      gap: 2px;
-    }
-
-    .day-downtime {
-      font-size: 0.714rem;
+      gap: 4px;
+      font-size: 0.679rem;
       font-weight: 600;
-      color: rgba(255, 255, 255, 0.85);
-      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+      line-height: 1.2;
     }
 
-    .day-hours {
-      font-size: 0.643rem;
-      color: rgba(255, 255, 255, 0.55);
-      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    .pct-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .pct-val {
+      white-space: nowrap;
+    }
+
+    .pct-online { color: #22c55e; }
+    .pct-offline { color: #ef4444; }
+    .pct-unknown { color: #9ca3af; }
+
+    .dot-online { background: #22c55e; }
+    .dot-offline { background: #ef4444; }
+    .dot-unknown { background: #9ca3af; }
+
+    /* Future / empty day */
+    .day-future {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      opacity: 0.4;
     }
 
     /* ── Modal ── */
@@ -400,10 +434,37 @@
       margin-bottom: 18px;
     }
 
+    .modal-summary {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 18px;
+      flex-wrap: wrap;
+    }
+
+    .modal-summary-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: var(--radius-sm);
+      background: var(--bg-glass);
+      border: 1px solid var(--border-subtle);
+      font-size: 0.786rem;
+      font-weight: 600;
+    }
+
+    .modal-summary-item .ms-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+
     .calendar-modal .timeline {
       margin: 0 0 20px 0;
       padding: 0;
       list-style: none;
+      max-height: 300px;
+      overflow-y: auto;
     }
 
     .calendar-modal .timeline li {
@@ -598,13 +659,17 @@
       <input type="text" id="nvr-filter" class="search-input" placeholder="Search NVRs…" style="width:260px;" />
 
       <div class="legend-card">
-        <span class="legend-label">Downtime</span>
-        <div>
-          <div class="legend-gradient"></div>
-          <div class="legend-ends">
-            <span class="lo">0 %</span>
-            <span class="hi">100 %</span>
-          </div>
+        <div class="legend-item">
+          <div class="legend-swatch dot-online"></div>
+          <span class="legend-text">Online</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-swatch dot-offline"></div>
+          <span class="legend-text">Offline</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-swatch dot-unknown"></div>
+          <span class="legend-text">Unknown</span>
         </div>
       </div>
     </div>
@@ -691,6 +756,16 @@
       return await res.json();
     }
 
+    async function loadCalendarMeta() {
+      try {
+        const res = await fetch('/api/calendar/meta');
+        const data = await res.json();
+        return (data && data.status === 'ok' && Number.isFinite(data.baseline_ts)) ? data.baseline_ts : null;
+      } catch (e) {
+        return null;
+      }
+    }
+
     function buildDays(from, to) {
       const days = [];
       const cur = new Date(startOfDay(from));
@@ -702,39 +777,57 @@
       return days;
     }
 
-    function computeDailyDowntime(dayStart, dayEnd, offlineIntervals) {
-      let total = 0;
+    /**
+     * Compute online / offline / unknown milliseconds for a single day.
+     *
+     * Logic:
+     * 1. Start with dayMs = dayEnd - dayStart   (full available time for this day)
+     * 2. Sum all offline intervals overlapping this day → offlineMs
+     * 3. Sum all unknown intervals overlapping this day → unknownMs
+     * 4. If baselineTs is set AND dayStart < baselineTs, mark the portion
+     *    before baselineTs as unknown (system wasn't monitoring yet).
+     * 5. Ensure offline + unknown never exceeds dayMs.
+     * 6. onlineMs = dayMs - offlineMs - unknownMs
+     */
+    function computeDayStats(dayStart, dayEnd, offlineIntervals, unknownIntervals, baselineTs) {
+      const dayMs = dayEnd - dayStart;
+      if (dayMs <= 0) return { onlineMs: 0, offlineMs: 0, unknownMs: 0, dayMs: 0 };
+
+      let offlineMs = 0;
       for (const iv of offlineIntervals) {
         const s = new Date(iv.start * 1000);
         const e = new Date((iv.end ?? Math.floor(Date.now() / 1000)) * 1000);
-        const overlapStart = new Date(Math.max(s.getTime(), dayStart.getTime()));
-        const overlapEnd = new Date(Math.min(e.getTime(), dayEnd.getTime()));
-        const durMs = overlapEnd - overlapStart;
-        if (durMs > 0) total += durMs;
+        const overlapStart = Math.max(s.getTime(), dayStart.getTime());
+        const overlapEnd = Math.min(e.getTime(), dayEnd.getTime());
+        if (overlapEnd > overlapStart) offlineMs += (overlapEnd - overlapStart);
       }
-      const dayMs = dayEnd - dayStart;
-      const ratio = dayMs > 0 ? total / dayMs : 0;
-      return { millis: total, ratio };
-    }
 
-    /* Color for downtime ratio — green → yellow → red */
-    function colorForRatio(r) {
-      const c = Math.max(0, Math.min(1, r));
-      if (c === 0) return 'rgba(34,197,94,0.12)';
-      // green→yellow→red
-      if (c < 0.5) {
-        const t = c * 2;
-        const red = Math.round(34 + (234 - 34) * t);
-        const green = Math.round(197 + (179 - 197) * t);
-        const blue = Math.round(94 + (8 - 94) * t);
-        return `rgba(${red},${green},${blue},${0.25 + 0.35 * t})`;
-      } else {
-        const t = (c - 0.5) * 2;
-        const red = Math.round(234 + (239 - 234) * t);
-        const green = Math.round(179 + (68 - 179) * t);
-        const blue = Math.round(8 + (68 - 8) * t);
-        return `rgba(${red},${green},${blue},${0.6 + 0.25 * t})`;
+      let unknownMs = 0;
+      for (const iv of unknownIntervals) {
+        const s = new Date(iv.start * 1000);
+        const e = new Date((iv.end ?? Math.floor(Date.now() / 1000)) * 1000);
+        const overlapStart = Math.max(s.getTime(), dayStart.getTime());
+        const overlapEnd = Math.min(e.getTime(), dayEnd.getTime());
+        if (overlapEnd > overlapStart) unknownMs += (overlapEnd - overlapStart);
       }
+
+      // Before baseline = monitoring system wasn't running yet → unknown
+      if (baselineTs && Number.isFinite(baselineTs)) {
+        const baselineMs = baselineTs * 1000;
+        const dayStartMs = dayStart.getTime();
+        const dayEndMs = dayEnd.getTime();
+        if (baselineMs > dayStartMs) {
+          const preMonitorEnd = Math.min(dayEndMs, baselineMs);
+          unknownMs += (preMonitorEnd - dayStartMs);
+        }
+      }
+
+      // Cap: total cannot exceed day
+      offlineMs = Math.min(offlineMs, dayMs);
+      unknownMs = Math.min(unknownMs, dayMs - offlineMs);
+      const onlineMs = Math.max(0, dayMs - offlineMs - unknownMs);
+
+      return { onlineMs, offlineMs, unknownMs, dayMs };
     }
 
     function uptimeClass(pct) {
@@ -743,8 +836,14 @@
       return 'low';
     }
 
+    function fmtDuration(ms) {
+      const hrs = ms / 3600000;
+      if (hrs < 1) return Math.round(ms / 60000) + 'm';
+      return hrs.toFixed(1) + 'h';
+    }
+
     /* ───────── Render Calendar ───────── */
-    function renderCalendar(nvrs, events, days) {
+    function renderCalendar(nvrs, events, days, baselineTs) {
       const container = document.getElementById('calendar-container');
       container.innerHTML = '';
       const wrapper = document.createElement('div');
@@ -785,23 +884,42 @@
       let issueCount = 0;
       let uptimeSum = 0;
 
+      const now = new Date();
+
       for (const nvr of filteredNvrs) {
         const row = document.createElement('div');
         row.className = 'calendar-row';
         row.style.gridTemplateColumns = colDef;
         const nameCell = document.createElement('div');
         nameCell.className = 'cell name';
-        const offline = (events[nvr.ip] || []).filter(x => x.type === 'offline');
-        const totalMs = (endOfDay(days[days.length - 1]) - startOfDay(days[0]));
-        let totalDownMs = 0;
+
+        const eventsForIp = events[nvr.ip] || [];
+        const offline = eventsForIp.filter(x => x.type === 'offline');
+        const unknown = eventsForIp.filter(x => x.type === 'unknown');
+
+        let totalMs = 0;
+        let totalOnlineMs = 0;
+        let totalOfflineMs = 0;
+        let totalUnknownMs = 0;
+
         for (let j = 0; j < days.length; j++) {
           const d = days[j];
           const dayStart = startOfDay(d);
-          const dayEnd = endOfDay(d);
-          const { millis } = computeDailyDowntime(dayStart, dayEnd, offline);
-          totalDownMs += millis;
+          if (dayStart > now) continue;
+
+          const isToday = dayStart.toDateString() === now.toDateString();
+          const dayEnd = isToday ? now : endOfDay(d);
+
+          const stats = computeDayStats(dayStart, dayEnd, offline, unknown, baselineTs);
+          totalMs += stats.dayMs;
+          totalOnlineMs += stats.onlineMs;
+          totalOfflineMs += stats.offlineMs;
+          totalUnknownMs += stats.unknownMs;
         }
-        const uptimePct = totalMs > 0 ? Math.max(0, 100 * (1 - (totalDownMs / totalMs))) : 100;
+
+        // Uptime % is computed over KNOWN time (exclude unknown from denominator)
+        const knownMs = totalOnlineMs + totalOfflineMs;
+        const uptimePct = knownMs > 0 ? (totalOnlineMs / knownMs) * 100 : 100;
         uptimeSum += uptimePct;
         if (uptimePct >= 99.99) perfectCount++;
         else issueCount++;
@@ -820,24 +938,97 @@
         for (let j = 0; j < days.length; j++) {
           const d = days[j];
           const dayStart = startOfDay(d);
-          const dayEnd = endOfDay(d);
-          const { millis, ratio } = computeDailyDowntime(dayStart, dayEnd, offline);
+
+          // Future days are empty
+          if (dayStart > now) {
+            const c = document.createElement('div');
+            c.className = 'cell day';
+            c.innerHTML = '<div class="day-future">—</div>';
+            row.appendChild(c);
+            continue;
+          }
+
+          const isToday = dayStart.toDateString() === now.toDateString();
+          const dayEnd = isToday ? now : endOfDay(d);
+
+          const stats = computeDayStats(dayStart, dayEnd, offline, unknown, baselineTs);
+
+          const onlinePct = stats.dayMs > 0 ? (stats.onlineMs / stats.dayMs) * 100 : 0;
+          const offlinePct = stats.dayMs > 0 ? (stats.offlineMs / stats.dayMs) * 100 : 0;
+          const unknownPct = stats.dayMs > 0 ? (stats.unknownMs / stats.dayMs) * 100 : 0;
+
           const c = document.createElement('div');
           c.className = 'cell day';
-          c.title = `${d.toLocaleDateString()} — downtime ${(millis / 3600000).toFixed(2)}h`;
 
-          c.style.background = colorForRatio(ratio);
-
-          if (millis > 0) {
-            const pctDown = (ratio * 100).toFixed(0);
-            const hrs = (millis / 3600000);
-            let durStr;
-            if (hrs < 1) durStr = Math.round(millis / 60000) + 'm';
-            else durStr = hrs.toFixed(1) + 'h';
-            c.innerHTML = `<div class="day-content"><span class="day-downtime">${pctDown}%</span><span class="day-hours">${durStr}</span></div>`;
+          // Background tint based on dominant status
+          let bgColor;
+          if (unknownPct > 95) {
+            bgColor = 'rgba(156,163,175,0.12)';
+          } else if (onlinePct >= 99) {
+            bgColor = 'rgba(34,197,94,0.08)';
+          } else if (offlinePct > 50) {
+            bgColor = 'rgba(239,68,68,0.10)';
+          } else if (offlinePct > 0) {
+            bgColor = 'rgba(234,179,8,0.08)';
           } else {
-            c.innerHTML = `<div class="day-content"><span style="color:var(--accent-green);font-size:0.786rem;font-weight:600;">✓</span></div>`;
+            bgColor = 'rgba(34,197,94,0.08)';
           }
+          c.style.background = bgColor;
+
+          c.title = `${d.toLocaleDateString()}\nOnline: ${onlinePct.toFixed(1)}%\nOffline: ${offlinePct.toFixed(1)}%\nUnknown: ${unknownPct.toFixed(1)}%`;
+
+          // Build cell content: stacked bar + percentages
+          const inner = document.createElement('div');
+          inner.className = 'day-cell-inner';
+
+          // Stacked vertical bar
+          const bar = document.createElement('div');
+          bar.className = 'day-bar';
+          const segOnline = document.createElement('div');
+          segOnline.className = 'bar-seg';
+          segOnline.style.height = onlinePct + '%';
+          segOnline.style.background = '#22c55e';
+          const segOffline = document.createElement('div');
+          segOffline.className = 'bar-seg';
+          segOffline.style.height = offlinePct + '%';
+          segOffline.style.background = '#ef4444';
+          const segUnknown = document.createElement('div');
+          segUnknown.className = 'bar-seg';
+          segUnknown.style.height = unknownPct + '%';
+          segUnknown.style.background = '#9ca3af';
+          bar.appendChild(segOnline);
+          bar.appendChild(segOffline);
+          bar.appendChild(segUnknown);
+          inner.appendChild(bar);
+
+          // Percentages text
+          const pcts = document.createElement('div');
+          pcts.className = 'day-pcts';
+
+          // Always show online
+          const rowOn = document.createElement('div');
+          rowOn.className = 'pct-row';
+          rowOn.innerHTML = `<span class="pct-dot dot-online"></span><span class="pct-val pct-online">${Math.round(onlinePct)}%</span>`;
+          pcts.appendChild(rowOn);
+
+          // Show offline if > 0
+          if (offlinePct > 0.05) {
+            const rowOff = document.createElement('div');
+            rowOff.className = 'pct-row';
+            rowOff.innerHTML = `<span class="pct-dot dot-offline"></span><span class="pct-val pct-offline">${Math.round(offlinePct)}%</span>`;
+            pcts.appendChild(rowOff);
+          }
+
+          // Show unknown if > 0
+          if (unknownPct > 0.05) {
+            const rowUnk = document.createElement('div');
+            rowUnk.className = 'pct-row';
+            rowUnk.innerHTML = `<span class="pct-dot dot-unknown"></span><span class="pct-val pct-unknown">${Math.round(unknownPct)}%</span>`;
+            pcts.appendChild(rowUnk);
+          }
+
+          inner.appendChild(pcts);
+          c.appendChild(inner);
 
           c.addEventListener('mouseenter', () => {
             nameCell.classList.add('active');
@@ -847,7 +1038,7 @@
             nameCell.classList.remove('active');
             headerDayCells[j].classList.remove('active');
           });
-          c.addEventListener('click', () => showDayDetail(nvr, dayStart, dayEnd, offline));
+          c.addEventListener('click', () => showDayDetail(nvr, dayStart, dayEnd, offline, unknown, stats));
           row.appendChild(c);
         }
         wrapper.appendChild(row);
@@ -863,7 +1054,7 @@
     }
 
     /* ───────── Day Detail Modal ───────── */
-    function showDayDetail(nvr, dayStart, dayEnd, offlineIntervals) {
+    function showDayDetail(nvr, dayStart, dayEnd, offlineIntervals, unknownIntervals, stats) {
       const overlay = document.createElement('div');
       overlay.className = 'calendar-modal-overlay';
       const modal = document.createElement('div');
@@ -875,24 +1066,56 @@
       dateP.className = 'modal-date';
       dateP.textContent = dayStart.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
+      // Summary bar
+      const summaryDiv = document.createElement('div');
+      summaryDiv.className = 'modal-summary';
+
+      const onlinePct = stats.dayMs > 0 ? (stats.onlineMs / stats.dayMs) * 100 : 0;
+      const offlinePct = stats.dayMs > 0 ? (stats.offlineMs / stats.dayMs) * 100 : 0;
+      const unknownPct = stats.dayMs > 0 ? (stats.unknownMs / stats.dayMs) * 100 : 0;
+
+      summaryDiv.innerHTML = `
+        <div class="modal-summary-item">
+          <span class="ms-dot dot-online"></span>
+          <span style="color:#22c55e">${onlinePct.toFixed(1)}% Online</span>
+          <span style="color:var(--text-muted);font-size:0.714rem;">(${fmtDuration(stats.onlineMs)})</span>
+        </div>
+        <div class="modal-summary-item">
+          <span class="ms-dot dot-offline"></span>
+          <span style="color:#ef4444">${offlinePct.toFixed(1)}% Offline</span>
+          <span style="color:var(--text-muted);font-size:0.714rem;">(${fmtDuration(stats.offlineMs)})</span>
+        </div>
+        <div class="modal-summary-item">
+          <span class="ms-dot dot-unknown"></span>
+          <span style="color:#9ca3af">${unknownPct.toFixed(1)}% Unknown</span>
+          <span style="color:var(--text-muted);font-size:0.714rem;">(${fmtDuration(stats.unknownMs)})</span>
+        </div>
+      `;
+
       const items = [];
-      for (const iv of offlineIntervals) {
-        const s = new Date(iv.start * 1000);
-        const e = new Date((iv.end ?? Math.floor(Date.now() / 1000)) * 1000);
-        if (e < dayStart || s > dayEnd) continue;
-        const start = new Date(Math.max(s.getTime(), dayStart.getTime()));
-        const end = new Date(Math.min(e.getTime(), dayEnd.getTime()));
-        const durMs = end - start;
-        if (durMs <= 0) continue;
-        items.push({ start, end, durMs });
-      }
+      const addIntervals = (intervals, type) => {
+        for (const iv of intervals) {
+          const s = new Date(iv.start * 1000);
+          const e = new Date((iv.end ?? Math.floor(Date.now() / 1000)) * 1000);
+          if (e < dayStart || s > dayEnd) continue;
+          const start = new Date(Math.max(s.getTime(), dayStart.getTime()));
+          const end = new Date(Math.min(e.getTime(), dayEnd.getTime()));
+          const durMs = end - start;
+          if (durMs <= 0) continue;
+          items.push({ start, end, durMs, type });
+        }
+      };
+
+      addIntervals(offlineIntervals, 'offline');
+      addIntervals(unknownIntervals, 'unknown');
+
       items.sort((a, b) => a.start - b.start);
 
       let content;
       if (items.length === 0) {
         content = document.createElement('div');
         content.className = 'no-downtime';
-        content.textContent = '✓  No downtime on this day';
+        content.textContent = '✓  No downtime or unknown periods recorded on this day';
       } else {
         const ul = document.createElement('ul');
         ul.className = 'timeline';
@@ -900,12 +1123,20 @@
           const li = document.createElement('li');
           const dot = document.createElement('span');
           dot.className = 'dot';
+          if (it.type === 'unknown') {
+            dot.style.background = '#9ca3af';
+          }
           const timeSpan = document.createElement('span');
           timeSpan.textContent = `${it.start.toLocaleTimeString()} → ${it.end.toLocaleTimeString()}`;
+          if (it.type === 'unknown') {
+            timeSpan.textContent += ' (System Off)';
+            timeSpan.style.color = '#9ca3af';
+          } else {
+            timeSpan.textContent += ' (NVR Offline)';
+          }
           const dur = document.createElement('span');
           dur.className = 'dur';
-          const mins = Math.round(it.durMs / 60000);
-          dur.textContent = mins >= 60 ? (it.durMs / 3600000).toFixed(1) + 'h' : mins + 'min';
+          dur.textContent = fmtDuration(it.durMs);
           li.appendChild(dot);
           li.appendChild(timeSpan);
           li.appendChild(dur);
@@ -921,6 +1152,7 @@
 
       modal.appendChild(h);
       modal.appendChild(dateP);
+      modal.appendChild(summaryDiv);
       modal.appendChild(content);
       modal.appendChild(close);
       overlay.appendChild(modal);
@@ -933,8 +1165,9 @@
       setRangeInputs(from, to);
       let nvrs = await loadNvrs();
       let events = await loadEvents(from, to);
+      let baselineTs = await loadCalendarMeta();
       let days = buildDays(from, to);
-      renderCalendar(nvrs, events, days);
+      renderCalendar(nvrs, events, days, baselineTs);
 
       // Load button
       document.getElementById('load-range').addEventListener('click', async () => {
@@ -946,8 +1179,9 @@
         setRangeInputs(from, to);
         nvrs = await loadNvrs();
         events = await loadEvents(from, to);
+        baselineTs = await loadCalendarMeta();
         days = buildDays(from, to);
-        renderCalendar(nvrs, events, days);
+        renderCalendar(nvrs, events, days, baselineTs);
       });
 
       // Quick presets
@@ -960,14 +1194,15 @@
           setRangeInputs(from, to);
           nvrs = await loadNvrs();
           events = await loadEvents(from, to);
+          baselineTs = await loadCalendarMeta();
           days = buildDays(from, to);
-          renderCalendar(nvrs, events, days);
+          renderCalendar(nvrs, events, days, baselineTs);
         });
       });
 
       // Filter
       document.getElementById('nvr-filter').addEventListener('input', () => {
-        renderCalendar(nvrs, events, days);
+        renderCalendar(nvrs, events, days, baselineTs);
       });
     }
 
