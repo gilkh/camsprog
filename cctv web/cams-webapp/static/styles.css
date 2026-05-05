@@ -356,6 +356,57 @@ main {
   margin: 0;
 }
 
+.table-title-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.mobile-filters {
+  display: none;
+  gap: 6px;
+}
+
+.filter-btn {
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-medium);
+  padding: 4px 12px;
+  border-radius: 100px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.filter-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-focus);
+}
+
+.filter-btn.active[data-filter="Online"] {
+  background: var(--accent-green-soft);
+  color: var(--accent-green);
+  border-color: var(--accent-green);
+  box-shadow: 0 0 10px var(--accent-green-glow);
+}
+
+.filter-btn.active[data-filter="Offline"] {
+  background: var(--accent-red-soft);
+  color: var(--accent-red);
+  border-color: var(--accent-red);
+  box-shadow: 0 0 10px var(--accent-red-glow);
+}
+
+.filter-btn.active[data-filter="Warning"] {
+  background: var(--accent-amber-soft);
+  color: var(--accent-amber);
+  border-color: var(--accent-amber);
+  box-shadow: 0 0 10px var(--accent-amber-soft);
+}
+
 .table-header-actions {
   display: flex;
   gap: 8px;
@@ -962,6 +1013,18 @@ a.ip-link:focus-visible {
     align-items: flex-start;
     gap: 10px;
     padding: 12px 16px;
+  }
+
+  .table-title-group {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+  }
+
+  .mobile-filters {
+    display: flex;
   }
 
   .table-header-actions {
