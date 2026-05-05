@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from .monitor import MonitorState
+from .monitor import MonitorState, ping_ip
 from pydantic import BaseModel, Field
 from typing import Optional
 from pymongo import MongoClient
@@ -17,6 +17,9 @@ import requests
 from requests.auth import HTTPDigestAuth
 from datetime import datetime, timezone
 import time
+import xml.etree.ElementTree as ET
+import re
+import copy
 
 # Fast JSON helpers (prefer orjson)
 try:
@@ -239,6 +242,488 @@ def _friendly_alert_type(alert_type: str | None) -> str:
         }
         key = (alert_type or "").strip()
         return mapping.get(key, key.replace("_", " ").title() or "Alert")
+
+
+WEEKDAY_NAMES = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+]
+
+
+def _find_nvr_by_ip(ip: str) -> dict | None:
+    for item in monitor.get_snapshot():
+        if item.get("ip") == ip:
+            return item
+    return None
+
+
+def _safe_int(value, default=None):
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _normalize_hhmm(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    txt = value.strip()
+    m = re.match(r"^(\d{1,2}):(\d{2})(?::\d{2})?$", txt)
+    if not m:
+        return None
+    hh = int(m.group(1))
+    mm = int(m.group(2))
+    if hh < 0 or hh > 24 or mm < 0 or mm > 59:
+        return None
+    if hh == 24 and mm != 0:
+        return None
+    return f"{hh:02d}:{mm:02d}"
+
+
+def _weekday_index_from_text(value: str | None) -> int | None:
+    if not isinstance(value, str):
+        return None
+    key = value.strip().lower()
+    aliases = {
+        "monday": 0,
+        "mon": 0,
+        "tuesday": 1,
+        "tue": 1,
+        "tues": 1,
+        "wednesday": 2,
+        "wed": 2,
+        "thursday": 3,
+        "thu": 3,
+        "thur": 3,
+        "thurs": 3,
+        "friday": 4,
+        "fri": 4,
+        "saturday": 5,
+        "sat": 5,
+        "sunday": 6,
+        "sun": 6,
+    }
+    return aliases.get(key)
+
+
+def _milesight_action_to_mode(action_type: int | None) -> str:
+    val = _safe_int(action_type, 0) or 0
+    if val == 1:
+        return "recording"
+    if val == 2:
+        return "motion"
+    if val > 2:
+        return "event"
+    return "off"
+
+
+def _mode_to_milesight_action(mode: str | None) -> int:
+    m = (mode or "off").strip().lower()
+    if m == "recording":
+        return 1
+    if m == "motion":
+        return 2
+    if m == "event":
+        return 3
+    return 0
+
+
+def _parse_milesight_week(schedule_payload: dict) -> list[dict]:
+    week: list[dict] = []
+    schedule = schedule_payload.get("schedule") if isinstance(schedule_payload, dict) else None
+    if not isinstance(schedule, list):
+        return week
+
+    for idx, day_item in enumerate(schedule):
+        day_name = WEEKDAY_NAMES[idx] if idx < len(WEEKDAY_NAMES) else f"Day {idx + 1}"
+        entries: list[dict] = []
+        if isinstance(day_item, dict):
+            if _safe_int(day_item.get("wholedayEnable"), 0) == 1:
+                mode = _milesight_action_to_mode(_safe_int(day_item.get("wholedayActionType"), 0))
+                entries.append({"start": "00:00", "end": "24:00", "mode": mode})
+
+            plans = day_item.get("plans")
+            if isinstance(plans, list):
+                for p in plans:
+                    start_val = None
+                    end_val = None
+                    action_val = None
+                    if isinstance(p, dict):
+                        start_val = (
+                            p.get("start")
+                            or p.get("startTime")
+                            or p.get("beginTime")
+                            or p.get("begin")
+                        )
+                        end_val = (
+                            p.get("end")
+                            or p.get("endTime")
+                            or p.get("stopTime")
+                            or p.get("stop")
+                        )
+                        action_val = (
+                            p.get("actionType")
+                            or p.get("type")
+                            or p.get("recordType")
+                            or p.get("mode")
+                        )
+                    elif isinstance(p, list) and len(p) >= 3:
+                        start_val = p[0]
+                        end_val = p[1]
+                        action_val = p[2]
+
+                    start_hhmm = _normalize_hhmm(str(start_val)) if start_val is not None else None
+                    end_hhmm = _normalize_hhmm(str(end_val)) if end_val is not None else None
+                    if not start_hhmm or not end_hhmm:
+                        continue
+                    entries.append(
+                        {
+                            "start": start_hhmm,
+                            "end": end_hhmm,
+                            "mode": _milesight_action_to_mode(_safe_int(action_val, 0)),
+                        }
+                    )
+
+        week.append({"day_index": idx, "day": day_name, "entries": entries})
+    return week
+
+
+def _build_milesight_schedule_payload(base_payload: dict, week: list[dict]) -> dict:
+    out = dict(base_payload if isinstance(base_payload, dict) else {})
+    src_schedule = out.get("schedule")
+    if not isinstance(src_schedule, list):
+        src_schedule = [{} for _ in range(7)]
+
+    while len(src_schedule) < 7:
+        src_schedule.append({})
+
+    by_day: dict[int, list[dict]] = {}
+    for day_row in week or []:
+        if not isinstance(day_row, dict):
+            continue
+        d = _safe_int(day_row.get("day_index"), None)
+        if d is None:
+            d = _weekday_index_from_text(day_row.get("day"))
+        if d is None or d < 0 or d > 6:
+            continue
+        entries = day_row.get("entries")
+        if isinstance(entries, list):
+            by_day[d] = entries
+
+    for idx in range(7):
+        existing = src_schedule[idx]
+        if not isinstance(existing, dict):
+            existing = {}
+
+        entries = by_day.get(idx, [])
+        normalized_entries: list[dict] = []
+        for ent in entries:
+            if not isinstance(ent, dict):
+                continue
+            start_hhmm = _normalize_hhmm(ent.get("start"))
+            end_hhmm = _normalize_hhmm(ent.get("end"))
+            if not start_hhmm or not end_hhmm:
+                continue
+            normalized_entries.append(
+                {
+                    "start": f"{start_hhmm}:00",
+                    "end": f"{end_hhmm}:00",
+                    "actionType": _mode_to_milesight_action(ent.get("mode")),
+                }
+            )
+
+        existing["wholedayEnable"] = 0
+        existing["wholedayActionType"] = 0
+        existing["plans"] = normalized_entries
+        src_schedule[idx] = existing
+
+    out["schedule"] = src_schedule
+    return out
+
+
+def _xml_local_name(tag: str) -> str:
+    if not isinstance(tag, str):
+        return ""
+    if "}" in tag:
+        return tag.rsplit("}", 1)[-1]
+    return tag
+
+
+def _extract_hikvision_track_ids(tracks_xml: str, channel: int) -> list[int]:
+    ids: list[int] = []
+    try:
+        root = ET.fromstring(tracks_xml)
+        all_track_ids: list[int] = []
+        for elem in root.iter():
+            if _xml_local_name(elem.tag).lower() != "track":
+                continue
+            track_id = None
+            src_channel = None
+            for child in elem:
+                name = _xml_local_name(child.tag).lower()
+                txt = (child.text or "").strip()
+                if name == "id":
+                    track_id = _safe_int(txt, None)
+                elif name == "srcchannel":
+                    src_channel = _safe_int(txt, None)
+            if track_id is None:
+                continue
+            all_track_ids.append(track_id)
+            if src_channel == channel:
+                ids.append(track_id)
+                continue
+            # Many Hikvision firmwares expose track IDs as <channel><stream>, e.g. 101/102 for channel 1.
+            if track_id >= 100 and (track_id // 100) == channel:
+                ids.append(track_id)
+    except Exception:
+        return []
+    dedup = sorted(set(ids))
+    if dedup:
+        return dedup
+
+    # Last-resort fallback for variants that return one track without explicit mapping fields.
+    all_dedup = sorted(set(all_track_ids))
+    if len(all_dedup) == 1:
+        return all_dedup
+    return []
+
+
+def _hikvision_mode_to_ui(mode_text: str | None) -> str:
+    m = (mode_text or "").strip().upper()
+    if m in {"CMR", "CONTINUOUS", "TIMING", "TIMER"}:
+        return "recording"
+    if m in {"MR", "MOTION"}:
+        return "motion"
+    if m in {"ER", "AR", "EVENT", "ALARM", "ALLEVENT", "ALL_EVENT"}:
+        return "event"
+    if m in {"OFF", "NONE", ""}:
+        return "off"
+    return m.lower()
+
+
+def _ui_mode_to_hikvision(mode_text: str | None) -> str:
+    m = (mode_text or "off").strip().lower()
+    if m == "recording":
+        return "CMR"
+    if m == "motion":
+        return "MOTION"
+    if m == "event":
+        return "AllEvent"
+    return "OFF"
+
+
+def _entries_to_week(entries: list[dict]) -> list[dict]:
+    grouped: dict[int, list[dict]] = {i: [] for i in range(7)}
+    for row in entries or []:
+        if not isinstance(row, dict):
+            continue
+        d = _safe_int(row.get("day_index"), None)
+        if d is None:
+            d = _weekday_index_from_text(row.get("day"))
+        if d is None or d < 0 or d > 6:
+            continue
+        start = _normalize_hhmm(row.get("start")) or "00:00"
+        end = _normalize_hhmm(row.get("end")) or "24:00"
+        mode = (row.get("mode") or "off").strip().lower()
+        grouped[d].append({"start": start, "end": end, "mode": mode})
+
+    week: list[dict] = []
+    for d in range(7):
+        week.append({"day_index": d, "day": WEEKDAY_NAMES[d], "entries": grouped[d]})
+    return week
+
+
+def _apply_hikvision_week_to_track_xml(base_xml: str, week: list[dict]) -> str:
+    root = ET.fromstring(base_xml)
+
+    schedule_parent = None
+    schedule_blocks = []
+    for parent in root.iter():
+        kids = list(parent)
+        blocks = [k for k in kids if _xml_local_name(k.tag).lower() == "scheduleblock"]
+        if blocks:
+            schedule_parent = parent
+            schedule_blocks = blocks
+            break
+
+    if schedule_parent is None or not schedule_blocks:
+        raise ValueError("Unable to locate Hikvision schedule blocks in track XML")
+
+    template = schedule_blocks[0]
+    template_children = list(template)
+
+    day_tag = None
+    start_tag = None
+    end_tag = None
+    mode_tag = None
+    for child in template_children:
+        lname = _xml_local_name(child.tag).lower()
+        if day_tag is None and lname in {"dayofweek", "weekday", "day"}:
+            day_tag = child.tag
+        if start_tag is None and lname in {"starttime", "begintime", "start"}:
+            start_tag = child.tag
+        if end_tag is None and lname in {"endtime", "stoptime", "stop", "end"}:
+            end_tag = child.tag
+        if mode_tag is None and (lname in {"scheduleactionrecordingmode", "defaultrecordingmode", "recordingmode", "mode"} or "recordingmode" in lname):
+            mode_tag = child.tag
+
+    if day_tag is None:
+        day_tag = "DayOfWeek"
+    if start_tag is None:
+        start_tag = "StartTime"
+    if end_tag is None:
+        end_tag = "EndTime"
+    if mode_tag is None:
+        mode_tag = "ScheduleActionRecordingMode"
+
+    normalized: list[dict] = []
+    for day_row in week or []:
+        if not isinstance(day_row, dict):
+            continue
+        d = _safe_int(day_row.get("day_index"), None)
+        if d is None:
+            d = _weekday_index_from_text(day_row.get("day"))
+        if d is None or d < 0 or d > 6:
+            continue
+        entries = day_row.get("entries")
+        if not isinstance(entries, list):
+            continue
+        for ent in entries:
+            if not isinstance(ent, dict):
+                continue
+            start = _normalize_hhmm(ent.get("start"))
+            end = _normalize_hhmm(ent.get("end"))
+            if not start or not end:
+                continue
+            normalized.append(
+                {
+                    "day": WEEKDAY_NAMES[d],
+                    "start": f"{start}:00",
+                    "end": f"{end}:00",
+                    "mode": _ui_mode_to_hikvision(ent.get("mode")),
+                }
+            )
+
+    if not normalized:
+        for d in range(7):
+            normalized.append(
+                {
+                    "day": WEEKDAY_NAMES[d],
+                    "start": "00:00:00",
+                    "end": "24:00:00",
+                    "mode": "OFF",
+                }
+            )
+
+    for old in schedule_blocks:
+        schedule_parent.remove(old)
+
+    for item in normalized:
+        block = copy.deepcopy(template)
+
+        def _set_first(tag_name: str, value: str) -> bool:
+            for node in block.iter():
+                if _xml_local_name(node.tag).lower() == _xml_local_name(tag_name).lower():
+                    node.text = value
+                    return True
+            return False
+
+        if not _set_first(day_tag, item["day"]):
+            ET.SubElement(block, day_tag).text = item["day"]
+        if not _set_first(start_tag, item["start"]):
+            ET.SubElement(block, start_tag).text = item["start"]
+        if not _set_first(end_tag, item["end"]):
+            ET.SubElement(block, end_tag).text = item["end"]
+        if not _set_first(mode_tag, item["mode"]):
+            ET.SubElement(block, mode_tag).text = item["mode"]
+
+        schedule_parent.append(block)
+
+    return ET.tostring(root, encoding="unicode")
+
+
+def _parse_hikvision_track_schedule(track_xml: str) -> list[dict]:
+    rows: list[dict] = []
+    try:
+        root = ET.fromstring(track_xml)
+    except Exception:
+        return rows
+
+    # Track-level fallback mode for firmwares that do not expose explicit schedule blocks.
+    track_default_mode = None
+    for elem in root.iter():
+        if _xml_local_name(elem.tag).lower() != "track":
+            continue
+        for child in elem:
+            lname = _xml_local_name(child.tag).lower()
+            if lname in {"defaultrecordingmode", "recordingmode", "scheduleactionrecordingmode"} or "recordingmode" in lname:
+                track_default_mode = _hikvision_mode_to_ui((child.text or "").strip())
+                break
+        if track_default_mode:
+            break
+
+    for elem in root.iter():
+        if _xml_local_name(elem.tag).lower() != "scheduleblock":
+            continue
+
+        day_index = None
+        start = None
+        end = None
+        mode = None
+
+        for child in elem.iter():
+            lname = _xml_local_name(child.tag).lower()
+            txt = (child.text or "").strip()
+            if not txt:
+                continue
+            if day_index is None and lname in {"dayofweek", "weekday", "day"}:
+                day_index = _weekday_index_from_text(txt)
+            if start is None and lname in {"starttime", "begintime", "start"}:
+                start = _normalize_hhmm(txt)
+            if end is None and lname in {"endtime", "stoptime", "stop", "end"}:
+                end = _normalize_hhmm(txt)
+            if mode is None and (
+                lname in {"scheduleactionrecordingmode", "defaultrecordingmode", "recordingmode", "mode"}
+                or "recordingmode" in lname
+            ):
+                mode = _hikvision_mode_to_ui(txt)
+
+        if day_index is None:
+            continue
+        if not start:
+            start = "00:00"
+        if not end:
+            end = "24:00"
+        rows.append(
+            {
+                "day_index": day_index,
+                "day": WEEKDAY_NAMES[day_index],
+                "start": start,
+                "end": end,
+                "mode": mode or "recording",
+            }
+        )
+
+    if rows:
+        return rows
+
+    # If no schedule blocks exist, represent the track default as full-day schedule.
+    fallback_mode = (track_default_mode or "off").strip().lower()
+    return [
+        {
+            "day_index": d,
+            "day": WEEKDAY_NAMES[d],
+            "start": "00:00",
+            "end": "24:00",
+            "mode": fallback_mode,
+        }
+        for d in range(7)
+    ]
 
 
 def _severity_order(severity: str | None) -> int:
@@ -981,6 +1466,361 @@ def api_delete_nvr(ip: str):
     return JSONResponse({"status": "error", "message": "NVR not found"}, status_code=404)
 
 
+@app.get("/api/nvrs/{ip}/record_schedule")
+def api_get_record_schedule(ip: str, channel: int = 1):
+    nvr = _find_nvr_by_ip(ip)
+    if not nvr:
+        return JSONResponse({"status": "error", "message": "NVR not found"}, status_code=404)
+
+    vendor = (nvr.get("type") or "").strip()
+    username = nvr.get("username") or "admin"
+    password = nvr.get("password") or "admin"
+    channel_int = _safe_int(channel, None)
+    if channel_int is None or channel_int < 1:
+        return JSONResponse({"status": "error", "message": "channel must be >= 1"}, status_code=400)
+
+    if vendor in ("Milesight", "Milesight Old"):
+        try:
+            session = requests.Session()
+            web_auth_ok = monitor._milesight_web_login(session, ip, username, password, timeout=6)
+
+            def post_milesight(path: str, body):
+                nonlocal web_auth_ok
+                last_resp = None
+
+                def keepalive_online_user() -> None:
+                    if not web_auth_ok:
+                        return
+                    sid = (session.headers.get("X-Milesight-SessionId") or "").strip()
+                    keepalive_queries = ["action=set.user.online_user&action=1"]
+                    if sid:
+                        keepalive_queries.insert(0, f"action=set.user.online_user&action=1&sessionId={sid}")
+                    for q in keepalive_queries:
+                        try:
+                            monitor._milesight_web_get(session, ip, username, password, "/sdk.cgi", q, timeout=5)
+                        except Exception:
+                            pass
+
+                keepalive_online_user()
+                # Prefer native Milesight digest header flow used by web UI scripts.
+                try:
+                    resp = monitor._milesight_web_post_json(session, ip, username, password, path, payload=body, timeout=8)
+                    last_resp = resp
+                    if resp.status_code == 200:
+                        return resp
+                    if resp.status_code == 401:
+                        web_auth_ok = monitor._milesight_web_login(session, ip, username, password, timeout=6)
+                        keepalive_online_user()
+                        resp2 = monitor._milesight_web_post_json(session, ip, username, password, path, payload=body, timeout=8)
+                        last_resp = resp2
+                        if resp2.status_code == 200:
+                            return resp2
+                except Exception:
+                    pass
+
+                # Some Milesight Old firmwares reject /cgi/main/1000 login but still accept direct auth on 6040.
+                for auth in ((username, password), HTTPDigestAuth(username, password)):
+                    try:
+                        resp = requests.post(f"http://{ip}{path}", auth=auth, json=body, timeout=8)
+                        last_resp = resp
+                        if resp.status_code == 200:
+                            return resp
+                    except Exception:
+                        pass
+                return last_resp
+
+            zero_based_channel = channel_int - 1
+            r = post_milesight("/cgi/main/6040", zero_based_channel)
+            if r is None:
+                return JSONResponse(
+                    {"status": "error", "message": "Milesight schedule read request failed"},
+                    status_code=502,
+                )
+            if r.status_code != 200:
+                return JSONResponse(
+                    {"status": "error", "message": f"Milesight schedule read failed ({r.status_code})"},
+                    status_code=r.status_code,
+                )
+
+            try:
+                body = r.json()
+            except Exception:
+                body = None
+            if not isinstance(body, dict):
+                return JSONResponse({"status": "error", "message": "Milesight schedule payload is not JSON"}, status_code=502)
+
+            week = _parse_milesight_week(body)
+            return {
+                "status": "ok",
+                "vendor": "Milesight",
+                "channel": channel_int,
+                "channel_device": zero_based_channel,
+                "week": week,
+                "raw": body,
+            }
+        except Exception as e:
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    if vendor == "Hikvision":
+        try:
+            auth = HTTPDigestAuth(username, password)
+            tracks_url = f"http://{ip}/ISAPI/ContentMgmt/record/tracks"
+            tr = requests.get(tracks_url, auth=auth, timeout=8)
+            if tr.status_code != 200:
+                return JSONResponse(
+                    {"status": "error", "message": f"Hikvision track list read failed ({tr.status_code})"},
+                    status_code=tr.status_code,
+                )
+
+            track_ids = _extract_hikvision_track_ids(tr.text, channel_int)
+            if not track_ids:
+                return JSONResponse(
+                    {
+                        "status": "error",
+                        "message": f"No recording track mapped to channel {channel_int}",
+                        "channel": channel_int,
+                    },
+                    status_code=404,
+                )
+
+            track_id = track_ids[0]
+            track_url = f"http://{ip}/ISAPI/ContentMgmt/record/tracks/{track_id}"
+            rr = requests.get(track_url, auth=auth, timeout=8)
+            if rr.status_code != 200:
+                return JSONResponse(
+                    {"status": "error", "message": f"Hikvision track read failed ({rr.status_code})"},
+                    status_code=rr.status_code,
+                )
+
+            parsed = _parse_hikvision_track_schedule(rr.text)
+            week = _entries_to_week(parsed)
+
+            # Some Hikvision variants return a single full-day block; treat it as whole-week plan.
+            non_empty_days = [row for row in week if isinstance(row, dict) and isinstance(row.get("entries"), list) and row.get("entries")]
+            if len(non_empty_days) == 1:
+                only = non_empty_days[0]
+                ent = only.get("entries", [{}])[0] if only.get("entries") else {}
+                if (
+                    isinstance(ent, dict)
+                    and str(ent.get("start") or "") == "00:00"
+                    and str(ent.get("end") or "") == "24:00"
+                ):
+                    mode = str(ent.get("mode") or "off")
+                    week = [
+                        {
+                            "day_index": i,
+                            "day": WEEKDAY_NAMES[i],
+                            "entries": [{"start": "00:00", "end": "24:00", "mode": mode}],
+                        }
+                        for i in range(7)
+                    ]
+
+            return {
+                "status": "ok",
+                "vendor": "Hikvision",
+                "channel": channel_int,
+                "track_id": track_id,
+                "track_ids": track_ids,
+                "entries": parsed,
+                "week": week,
+                "raw_xml": rr.text,
+            }
+        except Exception as e:
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    return JSONResponse(
+        {"status": "error", "message": f"Schedule editing not supported for vendor '{vendor or 'Unknown'}'"},
+        status_code=400,
+    )
+
+
+@app.post("/api/nvrs/{ip}/record_schedule")
+def api_set_record_schedule(ip: str, payload: dict):
+    nvr = _find_nvr_by_ip(ip)
+    if not nvr:
+        return JSONResponse({"status": "error", "message": "NVR not found"}, status_code=404)
+
+    vendor = (nvr.get("type") or "").strip()
+    username = nvr.get("username") or "admin"
+    password = nvr.get("password") or "admin"
+    channel_int = _safe_int(payload.get("channel"), None)
+    if channel_int is None or channel_int < 1:
+        return JSONResponse({"status": "error", "message": "channel must be >= 1"}, status_code=400)
+
+    if vendor in ("Milesight", "Milesight Old"):
+        week = payload.get("week")
+        if not isinstance(week, list):
+            return JSONResponse({"status": "error", "message": "week must be a list"}, status_code=400)
+        try:
+            session = requests.Session()
+            web_auth_ok = monitor._milesight_web_login(session, ip, username, password, timeout=6)
+
+            def post_milesight(path: str, body):
+                nonlocal web_auth_ok
+                last_resp = None
+
+                def keepalive_online_user() -> None:
+                    if not web_auth_ok:
+                        return
+                    sid = (session.headers.get("X-Milesight-SessionId") or "").strip()
+                    keepalive_queries = ["action=set.user.online_user&action=1"]
+                    if sid:
+                        keepalive_queries.insert(0, f"action=set.user.online_user&action=1&sessionId={sid}")
+                    for q in keepalive_queries:
+                        try:
+                            monitor._milesight_web_get(session, ip, username, password, "/sdk.cgi", q, timeout=5)
+                        except Exception:
+                            pass
+
+                keepalive_online_user()
+                try:
+                    resp = monitor._milesight_web_post_json(session, ip, username, password, path, payload=body, timeout=10)
+                    last_resp = resp
+                    if resp.status_code == 200:
+                        return resp
+                    if resp.status_code == 401:
+                        web_auth_ok = monitor._milesight_web_login(session, ip, username, password, timeout=6)
+                        keepalive_online_user()
+                        resp2 = monitor._milesight_web_post_json(session, ip, username, password, path, payload=body, timeout=10)
+                        last_resp = resp2
+                        if resp2.status_code == 200:
+                            return resp2
+                except Exception:
+                    pass
+                for auth in ((username, password), HTTPDigestAuth(username, password)):
+                    try:
+                        resp = requests.post(f"http://{ip}{path}", auth=auth, json=body, timeout=10)
+                        last_resp = resp
+                        if resp.status_code == 200:
+                            return resp
+                    except Exception:
+                        pass
+                return last_resp
+
+            zero_based_channel = channel_int - 1
+            read_resp = post_milesight("/cgi/main/6040", zero_based_channel)
+            if read_resp is None:
+                return JSONResponse(
+                    {"status": "error", "message": "Milesight schedule read request failed"},
+                    status_code=502,
+                )
+            if read_resp.status_code != 200:
+                return JSONResponse(
+                    {"status": "error", "message": f"Milesight schedule read failed ({read_resp.status_code})"},
+                    status_code=read_resp.status_code,
+                )
+
+            try:
+                base_payload = read_resp.json()
+            except Exception:
+                base_payload = None
+            if not isinstance(base_payload, dict):
+                return JSONResponse({"status": "error", "message": "Milesight schedule payload is not JSON"}, status_code=502)
+
+            write_payload = _build_milesight_schedule_payload(base_payload, week)
+            write_resp = post_milesight("/cgi/main/6041", write_payload)
+            if write_resp is None:
+                return JSONResponse(
+                    {"status": "error", "message": "Milesight schedule write request failed"},
+                    status_code=502,
+                )
+            if write_resp.status_code != 200:
+                return JSONResponse(
+                    {"status": "error", "message": f"Milesight schedule write failed ({write_resp.status_code})"},
+                    status_code=write_resp.status_code,
+                )
+
+            return {
+                "status": "ok",
+                "vendor": "Milesight",
+                "channel": channel_int,
+                "channel_device": zero_based_channel,
+                "body_sample": (write_resp.text or "")[:300],
+            }
+        except Exception as e:
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    if vendor == "Hikvision":
+        raw_xml = payload.get("raw_xml")
+        week = payload.get("week")
+
+        track_id = _safe_int(payload.get("track_id"), None)
+        if track_id is None:
+            try:
+                auth = HTTPDigestAuth(username, password)
+                tracks_url = f"http://{ip}/ISAPI/ContentMgmt/record/tracks"
+                tr = requests.get(tracks_url, auth=auth, timeout=8)
+                if tr.status_code == 200:
+                    ids = _extract_hikvision_track_ids(tr.text, channel_int)
+                    if ids:
+                        track_id = ids[0]
+            except Exception:
+                pass
+        if track_id is None:
+            return JSONResponse({"status": "error", "message": "Unable to resolve Hikvision track_id"}, status_code=400)
+
+        try:
+            auth = HTTPDigestAuth(username, password)
+            track_url = f"http://{ip}/ISAPI/ContentMgmt/record/tracks/{track_id}"
+
+            if isinstance(week, list):
+                current_resp = requests.get(track_url, auth=auth, timeout=8)
+                if current_resp.status_code != 200:
+                    return JSONResponse(
+                        {
+                            "status": "error",
+                            "message": f"Hikvision track read failed ({current_resp.status_code})",
+                        },
+                        status_code=current_resp.status_code,
+                    )
+                raw_xml = _apply_hikvision_week_to_track_xml(current_resp.text, week)
+
+            if not isinstance(raw_xml, str) or not raw_xml.strip():
+                return JSONResponse(
+                    {
+                        "status": "error",
+                        "message": "week or raw_xml is required for Hikvision schedule updates",
+                    },
+                    status_code=400,
+                )
+
+            # Browser UI writes full TrackList to /ISAPI/ContentMgmt/record/tracks.
+            save_xml = raw_xml.strip()
+            if "<TrackList" not in save_xml:
+                save_xml = f"<?xml version='1.0' encoding='utf-8'?><TrackList>{save_xml}</TrackList>"
+
+            save_url = f"http://{ip}/ISAPI/ContentMgmt/record/tracks"
+            put_resp = requests.put(
+                save_url,
+                auth=auth,
+                data=save_xml.encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
+                timeout=10,
+            )
+            if put_resp.status_code not in (200, 201, 204):
+                return JSONResponse(
+                    {
+                        "status": "error",
+                        "message": f"Hikvision schedule write failed ({put_resp.status_code})",
+                        "body": (put_resp.text or "")[:500],
+                    },
+                    status_code=put_resp.status_code,
+                )
+            return {
+                "status": "ok",
+                "vendor": "Hikvision",
+                "channel": channel_int,
+                "track_id": track_id,
+            }
+        except Exception as e:
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    return JSONResponse(
+        {"status": "error", "message": f"Schedule editing not supported for vendor '{vendor or 'Unknown'}'"},
+        status_code=400,
+    )
+
+
 @app.post("/api/nvrs/{ip}/expected_recording")
 def api_set_expected_recording(ip: str, payload: dict):
     try:
@@ -1517,6 +2357,149 @@ def api_sync_time(ip: str):
         return JSONResponse({"status": "error", "message": detail}, status_code=502)
     except Exception:
         return JSONResponse({"status": "error", "message": "Sync request failed"}, status_code=500)
+
+
+@app.post("/api/nvrs/{ip}/shutdown")
+def api_shutdown_nvr(ip: str):
+    nvr = None
+    for x in monitor.get_snapshot():
+        if x.get("ip") == ip:
+            nvr = x
+            break
+    if not nvr:
+        return JSONResponse({"status": "error", "message": "NVR not found"}, status_code=404)
+
+    vendor = (nvr.get("type") or "").strip()
+    vendor_norm = vendor.lower()
+    username = nvr.get("username") or "admin"
+    password = nvr.get("password") or "admin"
+
+    def _ok_status(code: int) -> bool:
+        return 200 <= code < 300
+
+    def _request_with_fallback(method: str, url: str, timeout: int = 8, headers: dict | None = None, data=None, json_body=None):
+        auth_attempts = [HTTPDigestAuth(username, password), (username, password)]
+        last_resp = None
+        for auth in auth_attempts:
+            try:
+                resp = requests.request(
+                    method=method,
+                    url=url,
+                    auth=auth,
+                    headers=headers,
+                    data=data,
+                    json=json_body,
+                    timeout=timeout,
+                )
+                last_resp = resp
+                if _ok_status(resp.status_code):
+                    return resp
+            except Exception:
+                continue
+        return last_resp
+
+    def _verify_stays_offline(target_ip: str, grace_seconds: int = 10, observe_seconds: int = 35, poll_seconds: int = 5) -> tuple[bool, str | None]:
+        # Distinguish true shutdown from reboot: reboot usually returns online during this window.
+        try:
+            time.sleep(max(0, grace_seconds))
+            checks = max(1, observe_seconds // max(1, poll_seconds))
+            for _ in range(checks):
+                if ping_ip(target_ip, timeout_ms=1200):
+                    return False, "Device came back online. This model likely supports reboot only via API, while full shutdown is local-screen only."
+                time.sleep(max(1, poll_seconds))
+            return True, None
+        except Exception:
+            return False, "Unable to verify shutdown state"
+
+    def _finalize_shutdown_success() -> tuple[bool, JSONResponse | dict]:
+        off_ok, off_msg = _verify_stays_offline(ip)
+        monitor.refresh_once()
+        if off_ok:
+            return True, {"status": "ok", "message": "Shutdown command sent and device stayed offline"}
+        return False, JSONResponse({"status": "error", "message": off_msg or "Shutdown verification failed"}, status_code=409)
+
+    try:
+        attempts = []
+
+        try_milesight = vendor_norm in ("milesight", "milesight old") or vendor_norm == ""
+        try_hikvision = vendor_norm in ("hikvision", "hickvision", "hik") or vendor_norm == ""
+        try_uniview = vendor_norm in ("uniview", "unv") or vendor_norm == ""
+
+        if try_milesight:
+            session = requests.Session()
+            web_auth_ok = monitor._milesight_web_login(session, ip, username, password, timeout=6)
+            if web_auth_ok:
+                try:
+                    r = monitor._milesight_web_get(session, ip, username, password, "/sdk.cgi", "action=set.system.poweroff", timeout=6)
+                    attempts.append(("GET", "/sdk.cgi?action=set.system.poweroff", r.status_code))
+                    if _ok_status(r.status_code):
+                        ok, payload = _finalize_shutdown_success()
+                        return payload
+                except Exception:
+                    pass
+
+            for path in (
+                "/sdk.cgi?action=set.system.poweroff",
+                "/V1.0/sdk.cgi?action=set.system.poweroff",
+            ):
+                url = f"http://{ip}{path}"
+                resp = _request_with_fallback("GET", url, timeout=6)
+                if resp is not None:
+                    attempts.append(("GET", path, resp.status_code))
+                    if _ok_status(resp.status_code):
+                        ok, payload = _finalize_shutdown_success()
+                        return payload
+
+        if try_hikvision:
+            for method, path in (
+                ("PUT", "/ISAPI/System/poweroff"),
+                ("PUT", "/ISAPI/System/shutdown"),
+                ("POST", "/ISAPI/System/poweroff"),
+                ("POST", "/ISAPI/System/shutdown"),
+            ):
+                url = f"http://{ip}{path}"
+                resp = _request_with_fallback(method, url, timeout=8)
+                if resp is not None:
+                    attempts.append((method, path, resp.status_code))
+                    if _ok_status(resp.status_code):
+                        ok, payload = _finalize_shutdown_success()
+                        return payload
+
+        if try_uniview:
+            for method, path in (
+                ("PUT", "/LAPI/V1.0/System/Shutdown"),
+                ("PUT", "/LAPI/V1.0/System/Poweroff"),
+                ("POST", "/LAPI/V1.0/System/Shutdown"),
+                ("POST", "/LAPI/V1.0/System/Poweroff"),
+                ("PUT", "/ISAPI/System/poweroff"),
+                ("POST", "/ISAPI/System/poweroff"),
+            ):
+                url = f"http://{ip}{path}"
+                resp = _request_with_fallback(method, url, timeout=8)
+                if resp is not None:
+                    attempts.append((method, path, resp.status_code))
+                    if _ok_status(resp.status_code):
+                        ok, payload = _finalize_shutdown_success()
+                        return payload
+
+        if attempts:
+            if try_milesight:
+                milesight_poweroff = [a for a in attempts if "set.system.poweroff" in a[1]]
+                if milesight_poweroff and all(int(a[2]) == 400 for a in milesight_poweroff):
+                    return JSONResponse(
+                        {
+                            "status": "error",
+                            "message": "Milesight firmware rejected remote poweroff (HTTP 400). This model likely supports shutdown only from local screen/menu.",
+                        },
+                        status_code=409,
+                    )
+            attempt_text = "; ".join([f"{m} {p} -> {s}" for (m, p, s) in attempts])
+            return JSONResponse({"status": "error", "message": f"Shutdown command failed ({attempt_text})"}, status_code=502)
+        if vendor_norm:
+            return JSONResponse({"status": "error", "message": f"No shutdown endpoint available for vendor '{vendor}'"}, status_code=502)
+        return JSONResponse({"status": "error", "message": "No shutdown endpoint available for this NVR (type unknown)"}, status_code=502)
+    except Exception:
+        return JSONResponse({"status": "error", "message": "Shutdown request failed"}, status_code=500)
 
 
 @app.post("/api/nvrs/sync_time_all")

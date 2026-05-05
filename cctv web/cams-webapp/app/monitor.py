@@ -80,7 +80,7 @@ class MonitorState:
                 if not docs:
                     docs = load_nvrs_from_config() or []
                     if docs:
-                        fields_to_keep = {"name", "ip", "type", "username", "password", "status", "last_online", "offline_since", "date_time_status", "nvr_time", "camera_count", "recording_count"}
+                        fields_to_keep = {"name", "ip", "type", "username", "password", "status", "last_online", "offline_since", "date_time_status", "nvr_time", "camera_count", "recording_count", "disk_status"}
                         cleaned = []
                         for n in docs:
                             cleaned.append({k: n.get(k) for k in fields_to_keep})
@@ -97,6 +97,7 @@ class MonitorState:
             nvr.setdefault("offline_since", None)
             nvr.setdefault("camera_count", "Unknown")
             nvr.setdefault("recording_count", "Unknown")
+            nvr.setdefault("disk_status", "Unknown")
             nvr.setdefault("recording_expected", None)
             nvr.setdefault("channel_statuses", [])
         # --- Heartbeat: detect system-off gap and record unknown intervals ---
@@ -320,6 +321,7 @@ class MonitorState:
                 nvr_copy["nvr_time"] = "Offline"
                 nvr_copy["camera_count"] = "Offline"
                 nvr_copy["recording_count"] = "Offline"
+                nvr_copy["disk_status"] = "Offline"
                 nvr_copy["channel_statuses"] = []
             return nvr_copy
 
@@ -351,6 +353,7 @@ class MonitorState:
                     target["nvr_time"] = updated.get("nvr_time")
                     target["camera_count"] = updated.get("camera_count")
                     target["recording_count"] = updated.get("recording_count")
+                    target["disk_status"] = updated.get("disk_status")
                     target["channel_statuses"] = updated.get("channel_statuses", [])
                 else:
                     if target.get("status") != "Offline":
@@ -359,6 +362,7 @@ class MonitorState:
                     target["nvr_time"] = "Offline"
                     target["camera_count"] = "Offline"
                     target["recording_count"] = "Offline"
+                    target["disk_status"] = "Offline"
                     target["channel_statuses"] = []
 
         # Persist fast to separate state file (avoid rewriting config.json each refresh)
@@ -510,6 +514,7 @@ class MonitorState:
                         "nvr_time": n.get("nvr_time"),
                         "camera_count": n.get("camera_count"),
                         "recording_count": n.get("recording_count"),
+                        "disk_status": n.get("disk_status"),
                         "recording_motion_config_count": n.get("recording_motion_config_count"),
                     }
                     self.db["nvrs"].update_one({"ip": ip}, {"$set": update}, upsert=True)
@@ -526,6 +531,7 @@ class MonitorState:
                     "nvr_time": n.get("nvr_time"),
                     "camera_count": n.get("camera_count"),
                     "recording_count": n.get("recording_count"),
+                    "disk_status": n.get("disk_status"),
                     "recording_motion_config_count": n.get("recording_motion_config_count"),
                 })
             tmp_path = STATE_PATH + ".tmp"
@@ -570,6 +576,7 @@ class MonitorState:
                 "offline_since": None,
                 "camera_count": "Unknown",
                 "recording_count": "Unknown",
+                "disk_status": "Unknown",
                 "nvr_time": "Not checked",
             }
             # Update if exists, else append
@@ -616,6 +623,7 @@ class MonitorState:
             nvr["nvr_time"] = "Unknown"
             nvr["camera_count"] = "Unknown"
             nvr["recording_count"] = "Unknown"
+            nvr["disk_status"] = "Unknown"
             nvr["channel_statuses"] = []
             session = requests.Session()
             if vendor in ("Hikvision", "Uniview"):
@@ -647,6 +655,15 @@ class MonitorState:
                 connected_ids: set[int] | None = None
                 recording_ids: set[int] = set()
                 motion_ids: set[int] = set()
+                rdisk = milesight_sdk_get("get.disk.storage_info&format=json", timeout=5)
+                if rdisk.status_code == 200 and rdisk.text:
+                    disk_mode = self._parse_milesight_disk_activity(rdisk.text)
+                    if disk_mode == "working":
+                        nvr["disk_status"] = "Working"
+                    elif disk_mode == "idle":
+                        nvr["disk_status"] = "Idle"
+                elif rdisk.status_code == 401:
+                    auth_failed = True
                 rc = milesight_sdk_get("get.camera.ipclist&format=json", timeout=5)
                 if rc.status_code == 200 and rc.text:
                     ids = self._parse_milesight_ipclist_connected_ids(rc.text)
@@ -818,6 +835,15 @@ class MonitorState:
                     nvr["nvr_time"] = f"Time failed: {r.status_code}"
                 motion_ids: set[int] = set()
                 rec_cfg_ids: set[int] = set()
+                rdisk = milesight_old_sdk_get("get.disk.storage_info&format=json", timeout=6)
+                if rdisk.status_code == 200 and rdisk.text:
+                    disk_mode = self._parse_milesight_disk_activity(rdisk.text)
+                    if disk_mode == "working":
+                        nvr["disk_status"] = "Working"
+                    elif disk_mode == "idle":
+                        nvr["disk_status"] = "Idle"
+                elif rdisk.status_code == 401:
+                    auth_failed = True
 
                 if web_auth_ok:
                     try:
@@ -945,6 +971,33 @@ class MonitorState:
                     nvr["channel_statuses"] = []
 
             elif vendor == "Hikvision":
+                disk_states: list[str] = []
+                storage_url = f"http://{ip}/ISAPI/ContentMgmt/Storage"
+                storage_resp = session.get(storage_url, timeout=5)
+                if storage_resp.status_code == 200 and storage_resp.text:
+                    storage_state = self._parse_hikvision_storage_activity(storage_resp.text)
+                    if storage_state in {"working", "idle"}:
+                        disk_states.append(storage_state)
+                    hdd_ids = self._parse_hikvision_storage_hdd_ids(storage_resp.text)
+                    for hdd_id in hdd_ids:
+                        sync_url = f"http://{ip}/ISAPI/ContentMgmt/Storage/hdd/{hdd_id}/syncStatus?format=json"
+                        try:
+                            sync_resp = session.get(sync_url, timeout=5)
+                        except Exception:
+                            continue
+                        if sync_resp.status_code != 200 or not sync_resp.text:
+                            continue
+                        sync_state = self._parse_hikvision_sync_status_activity(sync_resp.text)
+                        if sync_state in {"working", "idle"}:
+                            disk_states.append(sync_state)
+                merged_disk = self._merge_disk_activity_states(disk_states)
+                if merged_disk == "working":
+                    nvr["disk_status"] = "Working"
+                elif merged_disk == "normal":
+                    nvr["disk_status"] = "Normal"
+                elif merged_disk == "idle":
+                    nvr["disk_status"] = "Idle"
+
                 # Time (namespace-agnostic)
                 time_url = f"http://{ip}/ISAPI/System/time"
                 r = session.get(time_url, timeout=5)
@@ -1761,6 +1814,11 @@ class MonitorState:
             try:
                 data = r.json()
                 if isinstance(data, dict) and int(data.get("type", -1)) == 0:
+                    session_id = data.get("sessionId")
+                    if session_id is None:
+                        session_id = data.get("sessionid")
+                    if session_id is not None:
+                        session.headers["X-Milesight-SessionId"] = str(session_id)
                     return True
             except Exception:
                 pass
@@ -2592,6 +2650,170 @@ class MonitorState:
             return total if total > 0 else None
         except Exception:
             return None
+
+    def _merge_disk_activity_states(self, states: list[str]) -> str | None:
+        clean = [str(s).strip().lower() for s in states if isinstance(s, str) and s.strip()]
+        if not clean:
+            return None
+        if any(s == "working" for s in clean):
+            return "working"
+        if any(s == "normal" for s in clean):
+            return "normal"
+        if any(s == "idle" for s in clean):
+            return "idle"
+        return None
+
+    def _classify_disk_activity_text(self, value: Any) -> str | None:
+        text = str(value or "").strip().lower()
+        if not text:
+            return None
+        active_tokens = (
+            "working", "busy", "record", "write", "read", "format", "repair",
+            "rebuild", "syncing", "initialize", "inprogress", "in_progress",
+        )
+        idle_tokens = (
+            "idle", "standby", "sleep",
+        )
+        normal_tokens = (
+            "normal", "ready", "online", "ok",
+        )
+        if any(tok in text for tok in active_tokens):
+            return "working"
+        if any(tok in text for tok in normal_tokens):
+            return "normal"
+        if any(tok in text for tok in idle_tokens):
+            return "idle"
+        return None
+
+    def _classify_disk_activity_keyed(self, key: str, value: Any) -> str | None:
+        lk = str(key or "").strip().lower()
+        if not lk:
+            return self._classify_disk_activity_text(value)
+
+        # Boolean and numeric activity hints frequently used by NVR APIs.
+        if isinstance(value, bool):
+            if any(tok in lk for tok in ("busy", "work", "record", "write", "read", "sync", "format")):
+                return "working" if value else "idle"
+            if "idle" in lk:
+                return "idle" if value else "normal"
+
+        if isinstance(value, (int, float)):
+            iv = int(value)
+            if any(tok in lk for tok in ("busy", "work", "record", "write", "read", "sync", "format")):
+                return "working" if iv > 0 else "idle"
+            if "idle" in lk:
+                return "idle" if iv > 0 else "normal"
+            if "status" in lk or "state" in lk:
+                # Common status coding in embedded APIs: 0=normal, 1=busy/working, 2=idle.
+                if iv == 0:
+                    return "normal"
+                if iv == 1:
+                    return "working"
+                if iv == 2:
+                    return "idle"
+
+        return self._classify_disk_activity_text(value)
+
+    def _collect_disk_activity_states_from_json(self, node: Any) -> list[str]:
+        states: list[str] = []
+
+        def walk(obj: Any) -> None:
+            if isinstance(obj, dict):
+                for key, val in obj.items():
+                    lk = str(key).strip().lower()
+                    if isinstance(val, (str, int, float, bool)):
+                        if any(tok in lk for tok in ("status", "state", "busy", "work", "sync", "record", "rw", "idle", "read", "write", "format")):
+                            s = self._classify_disk_activity_keyed(lk, val)
+                            if s:
+                                states.append(s)
+                    if isinstance(val, (dict, list)):
+                        walk(val)
+            elif isinstance(obj, list):
+                for item in obj:
+                    walk(item)
+
+        walk(node)
+        return states
+
+    def _parse_milesight_disk_activity(self, text: str) -> str | None:
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = None
+        if data is not None:
+            states = self._collect_disk_activity_states_from_json(data)
+            merged = self._merge_disk_activity_states(states)
+            if merged:
+                return merged
+
+        # Fallback for key=value responses.
+        lower_text = (text or "").lower()
+        if not lower_text:
+            return None
+        if any(tok in lower_text for tok in ("working", "busy", "record", "write", "read", "format", "syncing")):
+            return "working"
+        if any(tok in lower_text for tok in ("normal", "ready", "online", "ok")):
+            return "normal"
+        if "idle" in lower_text:
+            return "idle"
+        return None
+
+    def _parse_hikvision_storage_hdd_ids(self, xml_text: str) -> list[str]:
+        ids: list[str] = []
+        try:
+            root = ET.fromstring(xml_text)
+            for elem in root.iter():
+                tag = elem.tag
+                if not (isinstance(tag, str) and tag.lower().endswith("hdd")):
+                    continue
+                for child in elem:
+                    ctag = child.tag
+                    if isinstance(ctag, str) and ctag.lower().endswith("id"):
+                        val = (child.text or "").strip()
+                        if val:
+                            ids.append(val)
+                            break
+        except Exception:
+            return []
+
+        # Keep order but drop duplicates.
+        out: list[str] = []
+        seen: set[str] = set()
+        for x in ids:
+            if x in seen:
+                continue
+            seen.add(x)
+            out.append(x)
+        return out
+
+    def _parse_hikvision_storage_activity(self, xml_text: str) -> str | None:
+        states: list[str] = []
+        try:
+            root = ET.fromstring(xml_text)
+            for elem in root.iter():
+                tag = elem.tag
+                if not isinstance(tag, str):
+                    continue
+                lt = tag.lower()
+                if any(tok in lt for tok in ("status", "state", "sync", "work", "busy", "rw", "record")):
+                    s = self._classify_disk_activity_keyed(lt, (elem.text or "").strip())
+                    if s:
+                        states.append(s)
+        except Exception:
+            return None
+        return self._merge_disk_activity_states(states)
+
+    def _parse_hikvision_sync_status_activity(self, text: str) -> str | None:
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = None
+        if data is not None:
+            states = self._collect_disk_activity_states_from_json(data)
+            merged = self._merge_disk_activity_states(states)
+            if merged:
+                return merged
+        return self._classify_disk_activity_text(text)
 
     def _parse_milesight_time_response(self, text: str) -> str | None:
         """Parse Milesight time response supporting JSON or key=value formats."""

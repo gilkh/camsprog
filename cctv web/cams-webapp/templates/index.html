@@ -77,6 +77,7 @@
             <th data-sort-key="camera_count">Cameras</th>
             <th>Channels</th>
             <th data-sort-key="recording_count">Recording</th>
+            <th data-sort-key="disk_status">Disk</th>
             <th data-sort-key="recording_expected">Expected</th>
             <th data-sort-key="rec_status">Rec Status</th>
             <th data-sort-key="type">Type</th>
@@ -85,9 +86,9 @@
         </thead>
         <tbody id="nvr-body">
           <!-- Skeleton loaders while first load -->
-          <tr class="skeleton-row"><td colspan="13"><div class="skeleton" style="height:20px;width:100%;margin:8px 0;"></div></td></tr>
-          <tr class="skeleton-row"><td colspan="13"><div class="skeleton" style="height:20px;width:85%;margin:8px 0;"></div></td></tr>
-          <tr class="skeleton-row"><td colspan="13"><div class="skeleton" style="height:20px;width:92%;margin:8px 0;"></div></td></tr>
+          <tr class="skeleton-row"><td colspan="14"><div class="skeleton" style="height:20px;width:100%;margin:8px 0;"></div></td></tr>
+          <tr class="skeleton-row"><td colspan="14"><div class="skeleton" style="height:20px;width:85%;margin:8px 0;"></div></td></tr>
+          <tr class="skeleton-row"><td colspan="14"><div class="skeleton" style="height:20px;width:92%;margin:8px 0;"></div></td></tr>
         </tbody>
       </table>
     </div>
@@ -136,6 +137,51 @@
         </form>
       </div>
     </div>
+
+    <!-- Recording Schedule Modal -->
+    <div id="schedule-modal-overlay" class="modal-overlay" hidden>
+      <div class="modal" style="max-width: 880px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+          <h2 id="schedule-modal-title">Recording Schedule</h2>
+          <button type="button" id="btn-close-schedule-top" class="btn-secondary" aria-label="Close schedule">Close</button>
+        </div>
+        <div class="grid" style="grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+          <label>
+            <span>Channel</span>
+            <select id="schedule-channel"></select>
+          </label>
+          <label>
+            <span>Vendor</span>
+            <input id="schedule-vendor" type="text" readonly />
+          </label>
+        </div>
+
+        <div id="schedule-loading" style="display:none; margin: 6px 0 14px 0;">Loading schedule...</div>
+
+        <div id="schedule-milesight-panel" hidden>
+          <table style="width:100%; border-collapse: collapse; margin-bottom: 12px;">
+            <thead>
+              <tr>
+                <th style="text-align:left; padding:8px;">Day</th>
+                <th style="text-align:left; padding:8px;">Mode</th>
+                <th style="text-align:left; padding:8px;">Start</th>
+                <th style="text-align:left; padding:8px;">End</th>
+              </tr>
+            </thead>
+            <tbody id="schedule-week-rows"></tbody>
+          </table>
+          <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
+            Edit by day. Mode: recording, motion, event, or off.
+          </div>
+        </div>
+
+        <div class="form-actions" style="display:flex; gap:10px; margin-top: 14px;">
+          <button type="button" id="btn-save-schedule" class="btn-primary">Save Schedule</button>
+          <button type="button" id="btn-reload-schedule" class="btn-secondary">Reload</button>
+          <button type="button" id="btn-cancel-schedule" class="btn-secondary">Back To Dashboard</button>
+        </div>
+      </div>
+    </div>
   </main>
 
   <script>
@@ -147,6 +193,150 @@
     let currentSortDir = 'asc';
     let lastNvrs = []; // keep reference for search filtering
     let searchQuery = '';
+    let scheduleContext = null;
+
+    const WEEK_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+    function normalizeScheduleMode(mode) {
+      const m = String(mode || '').trim().toLowerCase();
+      if (!m) return 'off';
+      if (m === 'recording' || m === 'continuous' || m === 'cmr' || m === 'timing' || m === 'timer') return 'recording';
+      if (m === 'motion' || m === 'mr') return 'motion';
+      if (m === 'event' || m === 'er' || m === 'ar' || m === 'alarm' || m === 'allevent' || m === 'all_event') return 'event';
+      if (m === 'off' || m === 'none') return 'off';
+      return 'off';
+    }
+
+    function buildDefaultWeekRows() {
+      return WEEK_DAYS.map((day, i) => ({
+        day,
+        day_index: i,
+        entries: [{ start: '00:00', end: '24:00', mode: 'off' }],
+      }));
+    }
+
+    function normalizeWeekFromApiRows(rows) {
+      const out = buildDefaultWeekRows();
+      if (!Array.isArray(rows)) return out;
+      for (const row of rows) {
+        if (!row || typeof row !== 'object') continue;
+        const idx = Number.isInteger(row.day_index) ? row.day_index : out.findIndex(x => x.day.toLowerCase() === String(row.day || '').toLowerCase());
+        if (idx < 0 || idx > 6) continue;
+        const entries = Array.isArray(row.entries) ? row.entries : [];
+        const first = entries[0] || {};
+        out[idx] = {
+          day: WEEK_DAYS[idx],
+          day_index: idx,
+          entries: [{
+            start: (first.start || '00:00').slice(0, 5),
+            end: (first.end || '24:00').slice(0, 5),
+            mode: normalizeScheduleMode(first.mode),
+          }],
+        };
+      }
+
+      // Some Hikvision payloads return one full-day row; treat it as all-week profile.
+      const withEntries = out.filter(r => Array.isArray(r.entries) && r.entries.length > 0 && normalizeScheduleMode(r.entries[0].mode) !== 'off');
+      if (withEntries.length === 1) {
+        const one = withEntries[0].entries[0] || {};
+        const s = (one.start || '00:00').slice(0, 5);
+        const e = (one.end || '24:00').slice(0, 5);
+        if (s === '00:00' && (e === '24:00' || e === '23:59')) {
+          const m = normalizeScheduleMode(one.mode);
+          for (let i = 0; i < out.length; i += 1) {
+            out[i] = {
+              day: WEEK_DAYS[i],
+              day_index: i,
+              entries: [{ start: '00:00', end: '24:00', mode: m }],
+            };
+          }
+        }
+      }
+
+      return out;
+    }
+
+    function renderMilesightWeekRows(weekRows) {
+      const tbody = document.getElementById('schedule-week-rows');
+      tbody.innerHTML = '';
+      for (const row of weekRows) {
+        const ent = (row.entries && row.entries[0]) ? row.entries[0] : { start: '00:00', end: '24:00', mode: 'off' };
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td style="padding:8px;">${escapeHtml(row.day)}</td>
+          <td style="padding:8px;">
+            <select class="schedule-mode" data-day-index="${row.day_index}">
+              <option value="off" ${ent.mode === 'off' ? 'selected' : ''}>Off</option>
+              <option value="recording" ${ent.mode === 'recording' ? 'selected' : ''}>Recording</option>
+              <option value="motion" ${ent.mode === 'motion' ? 'selected' : ''}>Motion</option>
+              <option value="event" ${ent.mode === 'event' ? 'selected' : ''}>Event</option>
+            </select>
+          </td>
+          <td style="padding:8px;"><input class="schedule-start" data-day-index="${row.day_index}" type="time" value="${escapeHtml(ent.start || '00:00')}" /></td>
+          <td style="padding:8px;"><input class="schedule-end" data-day-index="${row.day_index}" type="time" value="${escapeHtml(ent.end === '24:00' ? '23:59' : (ent.end || '23:59'))}" /></td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function collectMilesightWeekRows() {
+      const week = buildDefaultWeekRows();
+      const modes = document.querySelectorAll('.schedule-mode');
+      for (const modeEl of modes) {
+        const idx = Number(modeEl.dataset.dayIndex);
+        if (!Number.isInteger(idx) || idx < 0 || idx > 6) continue;
+        const startEl = document.querySelector(`.schedule-start[data-day-index="${idx}"]`);
+        const endEl = document.querySelector(`.schedule-end[data-day-index="${idx}"]`);
+        let endVal = (endEl && endEl.value) ? endEl.value : '24:00';
+        if (endVal === '23:59') endVal = '24:00';
+        week[idx] = {
+          day: WEEK_DAYS[idx],
+          day_index: idx,
+          entries: [{
+            start: (startEl && startEl.value) ? startEl.value : '00:00',
+            end: endVal,
+            mode: normalizeScheduleMode(modeEl.value || 'off'),
+          }],
+        };
+      }
+      return week;
+    }
+
+    async function loadScheduleForCurrentChannel() {
+      if (!scheduleContext || !scheduleContext.ip) return;
+      const loading = document.getElementById('schedule-loading');
+      const milesightPanel = document.getElementById('schedule-milesight-panel');
+      loading.style.display = 'block';
+      milesightPanel.hidden = true;
+
+      const channel = Number(document.getElementById('schedule-channel').value || '1');
+      try {
+        const res = await fetch(`/api/nvrs/${encodeURIComponent(scheduleContext.ip)}/record_schedule?channel=${encodeURIComponent(channel)}`);
+        const data = await res.json();
+        if (!res.ok || data.status !== 'ok') {
+          throw new Error(data.message || 'Failed to load schedule');
+        }
+
+        scheduleContext.vendor = data.vendor || scheduleContext.vendor;
+        scheduleContext.channel = channel;
+        scheduleContext.track_id = data.track_id || null;
+        document.getElementById('schedule-vendor').value = scheduleContext.vendor || 'Unknown';
+
+        if ((data.vendor || '').toLowerCase().includes('milesight') || (data.vendor || '').toLowerCase() === 'hikvision') {
+          const sourceRows = Array.isArray(data.week) ? data.week : (Array.isArray(data.entries) ? data.entries : []);
+          const weekRows = normalizeWeekFromApiRows(sourceRows);
+          renderMilesightWeekRows(weekRows);
+          milesightPanel.hidden = false;
+        } else {
+          throw new Error(`Unsupported vendor: ${data.vendor || 'Unknown'}`);
+        }
+      } catch (err) {
+        alert(`Schedule load failed: ${err.message || 'Unknown error'}`);
+        closeScheduleModal();
+      } finally {
+        loading.style.display = 'none';
+      }
+    }
 
     function parseNumeric(value) {
       if (value === undefined || value === null) return null;
@@ -167,6 +357,16 @@
       return rec >= expected ? 0 : 1;
     }
 
+    function diskStatusRank(value) {
+      const s = String(value || '').trim().toLowerCase();
+      if (s === 'normal') return 0;
+      if (s === 'working') return 1;
+      if (s === 'idle') return 2;
+      if (s === 'unknown' || s === 'not checked' || s === '') return 3;
+      if (s === 'offline') return 4;
+      return 4;
+    }
+
     function parseNvrTimeForSort(value) {
       if (!value || typeof value !== 'string') return null;
       const normalized = value.includes(' ') ? value.replace(' ', 'T') : value;
@@ -183,6 +383,7 @@
       if (key === 'nvr_time') return parseNvrTimeForSort(nvr.nvr_time);
       if (key === 'camera_count') return parseNumeric(nvr.camera_count);
       if (key === 'recording_count') return parseNumeric(nvr.recording_count);
+      if (key === 'disk_status') return diskStatusRank(nvr.disk_status);
       if (key === 'recording_expected') return parseNumeric(nvr.recording_expected);
       if (key === 'rec_status') return recStatusRank(nvr);
       if (key === 'type') return (nvr.type || 'Unknown').toString().toLowerCase();
@@ -277,6 +478,17 @@
       return '<span class="rec-badge unknown">—</span>';
     }
 
+    function getDiskStatusBadge(value) {
+      const raw = (value ?? '').toString().trim();
+      const low = raw.toLowerCase();
+      if (low === 'normal') return '<span class="disk-badge normal">Normal</span>';
+      if (low === 'working') return '<span class="disk-badge working">Working</span>';
+      if (low === 'idle') return '<span class="disk-badge idle">Idle</span>';
+      if (low === 'offline') return '<span class="disk-badge offline">Offline</span>';
+      if (!raw) return '<span class="disk-badge unknown">Unknown</span>';
+      return `<span class="disk-badge unknown">${escapeHtml(raw)}</span>`;
+    }
+
     function getStatusBadge(status) {
       if (status === 'Online') {
         return '<span class="status-badge"><span class="status-dot online"></span> Online</span>';
@@ -352,7 +564,8 @@
         return (n.name || '').toLowerCase().includes(q)
           || (n.ip || '').toLowerCase().includes(q)
           || (n.type || '').toLowerCase().includes(q)
-          || (n.status || '').toLowerCase().includes(q);
+          || (n.status || '').toLowerCase().includes(q)
+          || (n.disk_status || '').toLowerCase().includes(q);
       });
     }
 
@@ -366,7 +579,7 @@
 
       if (nvrs.length === 0) {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td colspan="13">
+        tr.innerHTML = `<td colspan="14">
           <div class="empty-state">
             <div class="empty-state-icon">📡</div>
             <h3>${searchQuery ? 'No matching NVRs' : 'No NVRs added yet'}</h3>
@@ -396,14 +609,17 @@
             <td>${nvr.camera_count ?? '—'}</td>
             <td><div class="channel-list">${renderChannelStatuses(nvr.channel_statuses)}</div></td>
             <td>${recDisplay}</td>
+            <td>${getDiskStatusBadge(nvr.disk_status)}</td>
             <td>${expected !== null ? expected : '—'}</td>
             <td>${getRecStatusBadge(statusText)}</td>
             <td>${getTypeBadge(nvr.type)}</td>
             <td>
               <div class="action-row">
                 <button class="btn-edit" data-ip="${nvr.ip ?? ''}" data-tooltip="Edit">Edit</button>
+                <button class="btn-schedule" data-ip="${nvr.ip ?? ''}" data-tooltip="Recording Schedule">Sched</button>
                 <button class="btn-delete" data-ip="${nvr.ip ?? ''}" data-tooltip="Delete">Del</button>
                 <button class="btn-sync" data-ip="${nvr.ip ?? ''}" data-tooltip="Sync NVR Time">Sync</button>
+                <button class="btn-shutdown" data-ip="${nvr.ip ?? ''}" data-tooltip="Shutdown NVR">Off</button>
               </div>
             </td>
           `;
@@ -552,6 +768,12 @@
     const nvrModal = document.getElementById('nvr-modal-overlay');
     const btnAddNvr = document.getElementById('btn-add-nvr');
     const btnCancelNvr = document.getElementById('btn-cancel-nvr');
+    const scheduleModal = document.getElementById('schedule-modal-overlay');
+    const btnCancelSchedule = document.getElementById('btn-cancel-schedule');
+    const btnCloseScheduleTop = document.getElementById('btn-close-schedule-top');
+    const btnSaveSchedule = document.getElementById('btn-save-schedule');
+    const btnReloadSchedule = document.getElementById('btn-reload-schedule');
+    const scheduleChannelEl = document.getElementById('schedule-channel');
 
     function openNvrModal(isEdit = false) {
       const formEl = document.getElementById('nvr-form');
@@ -567,6 +789,43 @@
       nvrModal.hidden = true;
     }
 
+    function closeScheduleModal() {
+      scheduleModal.hidden = true;
+      scheduleContext = null;
+    }
+
+    async function openScheduleModal(ip) {
+      const nvr = lastNvrs.find(x => x.ip === ip);
+      if (!nvr) {
+        alert('NVR not found');
+        return;
+      }
+
+      scheduleContext = {
+        ip,
+        name: nvr.name || ip,
+        vendor: nvr.type || 'Unknown',
+        channel: 1,
+        track_id: null,
+      };
+
+      const title = document.getElementById('schedule-modal-title');
+      title.textContent = `Recording Schedule - ${scheduleContext.name} (${scheduleContext.ip})`;
+
+      const maxChannelsRaw = Number(nvr.camera_count);
+      const maxChannels = Number.isFinite(maxChannelsRaw) && maxChannelsRaw > 0 ? Math.min(maxChannelsRaw, 128) : 16;
+      scheduleChannelEl.innerHTML = '';
+      for (let i = 1; i <= maxChannels; i += 1) {
+        const opt = document.createElement('option');
+        opt.value = String(i);
+        opt.textContent = `Channel ${i}`;
+        scheduleChannelEl.appendChild(opt);
+      }
+      document.getElementById('schedule-vendor').value = scheduleContext.vendor || 'Unknown';
+      scheduleModal.hidden = false;
+      await loadScheduleForCurrentChannel();
+    }
+
     btnAddNvr.addEventListener('click', () => openNvrModal(false));
     if (btnCancelNvr) {
       btnCancelNvr.addEventListener('click', closeNvrModal);
@@ -576,17 +835,78 @@
         if (e.target === nvrModal) closeNvrModal();
       });
     }
+    if (scheduleModal) {
+      scheduleModal.addEventListener('click', (e) => {
+        if (e.target === scheduleModal) closeScheduleModal();
+      });
+    }
+    if (btnCancelSchedule) {
+      btnCancelSchedule.addEventListener('click', closeScheduleModal);
+    }
+    if (btnCloseScheduleTop) {
+      btnCloseScheduleTop.addEventListener('click', closeScheduleModal);
+    }
+    if (scheduleChannelEl) {
+      scheduleChannelEl.addEventListener('change', () => {
+        loadScheduleForCurrentChannel();
+      });
+    }
+    if (btnReloadSchedule) {
+      btnReloadSchedule.addEventListener('click', () => {
+        loadScheduleForCurrentChannel();
+      });
+    }
+    if (btnSaveSchedule) {
+      btnSaveSchedule.addEventListener('click', async () => {
+        if (!scheduleContext || !scheduleContext.ip) return;
+        const vendor = (scheduleContext.vendor || '').toLowerCase();
+        const channel = Number(scheduleChannelEl.value || '1');
+        let payload = { channel };
+
+        if (vendor.includes('milesight')) {
+          payload.week = collectMilesightWeekRows();
+        } else if (vendor === 'hikvision') {
+          payload.track_id = scheduleContext.track_id;
+          payload.week = collectMilesightWeekRows();
+        } else {
+          alert('Schedule editing is not supported for this vendor.');
+          return;
+        }
+
+        try {
+          const res = await fetch(`/api/nvrs/${encodeURIComponent(scheduleContext.ip)}/record_schedule`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const data = await res.json();
+          if (!res.ok || data.status !== 'ok') {
+            throw new Error(data.message || 'Failed to save schedule');
+          }
+          alert('Schedule saved');
+          await loadScheduleForCurrentChannel();
+          await refreshData();
+        } catch (err) {
+          alert(`Schedule save failed: ${err.message || 'Unknown error'}`);
+        }
+      });
+    }
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && !nvrModal.hidden) {
         closeNvrModal();
+      }
+      if (e.key === 'Escape' && !scheduleModal.hidden) {
+        closeScheduleModal();
       }
     });
 
     // Delegate edit/delete/sync button clicks
     document.addEventListener('click', async (e) => {
       const editBtn = e.target.closest('.btn-edit');
+      const scheduleBtn = e.target.closest('.btn-schedule');
       const delBtn = e.target.closest('.btn-delete');
       const syncBtn = e.target.closest('.btn-sync');
+      const shutdownBtn = e.target.closest('.btn-shutdown');
       if (editBtn) {
         const ip = editBtn.dataset.ip;
         try {
@@ -605,6 +925,11 @@
         } catch (err) {
           alert('Failed to load NVR for edit');
         }
+        return;
+      }
+      if (scheduleBtn) {
+        const ip = scheduleBtn.dataset.ip;
+        await openScheduleModal(ip);
         return;
       }
       if (delBtn) {
@@ -635,6 +960,22 @@
           }
         } catch (err) {
           alert('Sync request failed');
+        }
+      }
+      if (shutdownBtn) {
+        const ip = shutdownBtn.dataset.ip;
+        if (!confirm(`Shut down NVR ${ip}?`)) return;
+        try {
+          const res = await fetch(`/api/nvrs/${encodeURIComponent(ip)}/shutdown`, { method: 'POST' });
+          const data = await res.json();
+          if (res.ok) {
+            alert('Shutdown command sent');
+            await refreshData();
+          } else {
+            alert('Shutdown failed: ' + (data.message || 'Unknown error'));
+          }
+        } catch (err) {
+          alert('Shutdown request failed');
         }
       }
     });
