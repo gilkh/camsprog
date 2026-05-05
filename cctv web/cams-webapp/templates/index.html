@@ -33,21 +33,21 @@
           <span class="stat-label">Total NVRs</span>
         </div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card clickable" data-filter="Online">
         <div class="stat-icon online">✓</div>
         <div class="stat-info">
           <span class="stat-value" id="stat-online">—</span>
           <span class="stat-label">Online</span>
         </div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card clickable" data-filter="Offline">
         <div class="stat-icon offline">✕</div>
         <div class="stat-info">
           <span class="stat-value" id="stat-offline">—</span>
           <span class="stat-label">Offline</span>
         </div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card clickable" data-filter="Warning">
         <div class="stat-icon recording">⏺</div>
         <div class="stat-info">
           <span class="stat-value" id="stat-warnings">—</span>
@@ -58,14 +58,7 @@
 
     <!-- NVR Table -->
       <div class="table-header">
-        <div class="table-title-group">
-          <h2>NVR Devices</h2>
-          <div class="mobile-filters" id="mobile-filters">
-            <button class="filter-btn" data-filter="Online">Online</button>
-            <button class="filter-btn" data-filter="Offline">Offline</button>
-            <button class="filter-btn" data-filter="Warning">Warning</button>
-          </div>
-        </div>
+        <h2>NVR Devices</h2>
         <div class="table-header-actions">
           <a id="btn-download-csv" class="btn-export-csv" href="/api/nvrs/export" download>⬇ Download CSV</a>
           <input type="text" id="search-input" class="search-input" placeholder="Search NVRs…" />
@@ -530,17 +523,17 @@
 
     document.getElementById('refresh').addEventListener('click', refreshData);
 
-    // Mobile Filters
-    document.querySelectorAll('.filter-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const filter = btn.dataset.filter;
+    // Stats Cards Filtering
+    document.querySelectorAll('.stat-card.clickable').forEach(card => {
+      card.addEventListener('click', () => {
+        const filter = card.dataset.filter;
         if (activeStatusFilter === filter) {
           activeStatusFilter = null;
-          btn.classList.remove('active');
+          card.classList.remove('active');
         } else {
-          document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+          document.querySelectorAll('.stat-card.clickable').forEach(c => c.classList.remove('active'));
           activeStatusFilter = filter;
-          btn.classList.add('active');
+          card.classList.add('active');
         }
         renderTable(lastNvrs);
       });
