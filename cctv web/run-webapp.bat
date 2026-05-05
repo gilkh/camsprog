@@ -9,15 +9,18 @@ REM Automatically detect local IP address
 for /f "tokens=*" %%i in ('powershell -NoProfile -Command "$ip = (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } | Select-Object -First 1).IPv4Address[0].IPAddress; if (!$ip) { $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notmatch '^127\.' } | Select-Object -First 1).IPAddress }; if (!$ip) { $ip = '127.0.0.1' }; Write-Host $ip"') do set "LAN_HOST=%%i"
 REM Bind to 0.0.0.0 to listen on all network interfaces (more robust).
 set "BIND_HOST=0.0.0.0"
-REM Load port from PORT.txt and verify it's still available
+REM Try 50939 first (user preference)
 set "PORT="
-if exist "PORT.txt" (
+for /f "tokens=*" %%i in ('powershell -NoProfile -Command "$p='50939'; if (!(Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue)) { Write-Host $p }"') do set "PORT=%%i"
+
+if "%PORT%"=="" if exist "PORT.txt" (
     set /p SAVED_PORT=<PORT.txt
     for /f "tokens=*" %%i in ('powershell -NoProfile -Command "$p='%SAVED_PORT%'; if ($p -match '^\d+$' -and !(Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue)) { Write-Host $p }"') do set "PORT=%%i"
 )
 
-if not "%PORT%"=="" goto :PORT_FOUND
-for /f "tokens=*" %%i in ('powershell -NoProfile -Command "$listener = [System.Net.Sockets.TcpListener]0; $listener.Start(); $port = $listener.LocalEndpoint.Port; $listener.Stop(); Write-Host $port"') do set "PORT=%%i"
+if "%PORT%"=="" (
+    for /f "tokens=*" %%i in ('powershell -NoProfile -Command "$listener = [System.Net.Sockets.TcpListener]0; $listener.Start(); $port = $listener.LocalEndpoint.Port; $listener.Stop(); Write-Host $port"') do set "PORT=%%i"
+)
 echo %PORT%>PORT.txt
 :PORT_FOUND
 set "APP_DIR=%~dp0cams-webapp"

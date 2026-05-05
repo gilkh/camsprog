@@ -1967,6 +1967,88 @@ def api_set_all_password(payload: dict):
         return JSONResponse({"status": "error", "message": "Failed to update passwords"}, status_code=500)
 
 
+@app.get("/api/backup")
+def api_backup():
+    try:
+        db = app.state.db
+        data = {
+            "settings": list(db["settings"].find({})),
+            "nvrs": list(db["nvrs"].find({})),
+            "alerts": list(db["alerts"].find({})),
+            "emails": list(db["emails"].find({})),
+            "exported_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        def clean_data(obj):
+            if isinstance(obj, list):
+                return [clean_data(x) for x in obj]
+            if isinstance(obj, dict):
+                return {k: clean_data(v) for k, v in obj.items()}
+            if isinstance(obj, ObjectId):
+                return str(obj)
+            return obj
+
+        json_data = clean_data(data)
+
+        # Ensure backup directory exists in the project root
+        backup_dir = os.path.join(PROJECT_ROOT, "backup")
+        os.makedirs(backup_dir, exist_ok=True)
+
+        filename = f"cams_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        filepath = os.path.join(backup_dir, filename)
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(json_data, f, ensure_ascii=False, separators=(",", ":"))
+
+        return {
+            "status": "ok",
+            "message": f"Backup saved successfully to backup folder as {filename}",
+            "filename": filename
+        }
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.post("/api/restore")
+async def api_restore(request: Request):
+    try:
+        data = await request.json()
+        db = app.state.db
+
+        if not isinstance(data, dict) or "nvrs" not in data or "settings" not in data:
+            return JSONResponse({"status": "error", "message": "Invalid backup format"}, status_code=400)
+
+        def restore_col(name, items):
+            if not isinstance(items, list):
+                return
+            db[name].delete_many({})
+            if items:
+                prepared_items = []
+                for item in items:
+                    if "_id" in item and isinstance(item["_id"], str):
+                        try:
+                            if len(item["_id"]) == 24:
+                                item["_id"] = ObjectId(item["_id"])
+                        except:
+                            pass
+                    prepared_items.append(item)
+                db[name].insert_many(prepared_items)
+
+        restore_col("settings", data.get("settings"))
+        restore_col("nvrs", data.get("nvrs"))
+        restore_col("alerts", data.get("alerts"))
+        restore_col("emails", data.get("emails"))
+
+        # Reload monitor state from DB
+        with monitor.lock:
+            monitor.nvrs = list(db["nvrs"].find({}))
+            monitor._write_back()
+
+        return {"status": "ok", "message": "Database restored successfully"}
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
 @app.get("/api/diagnose/{ip}")
 def api_diagnose(ip: str):
     nvr = None

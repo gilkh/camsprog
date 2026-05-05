@@ -446,6 +446,43 @@
           </form>
         </div>
 
+        <!-- Backup & Restore -->
+        <div class="card">
+          <div class="card-header">
+            <div class="icon" style="background: #e0f2fe;">&#128190;</div>
+            <h2>Backup & Restore</h2>
+          </div>
+          <p style="margin: 0 0 16px 0; color: var(--text-muted); font-size: 14px;">
+            Export your configuration to the server's <b>backup</b> folder, or restore from a file.
+          </p>
+          <div class="form-actions" style="border: none; padding: 0; margin: 0; flex-direction: column; gap: 12px; align-items: stretch;">
+            <button class="btn btn-primary" id="backup-btn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                <polyline points="17 21 17 13 7 13 7 21"></polyline>
+              </svg>
+              Save Backup to Folder
+            </button>
+            
+            <div style="border-top: 1px dashed var(--border); margin: 8px 0;"></div>
+            
+            <div style="display: flex; flex-direction: column; gap: 8px;">
+              <label style="margin: 0;">Restore from file</label>
+              <div style="display: flex; gap: 10px;">
+                <input type="file" id="restore-file" accept=".json" style="padding: 6px; flex: 1;" />
+                <button class="btn btn-secondary" id="restore-btn" disabled>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="17 8 12 3 7 8"></polyline>
+                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                  </svg>
+                  Restore
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- SMTP Settings -->
         <div class="card">
           <div class="card-header">
@@ -628,7 +665,6 @@
         </div>
       </div>
     </main>
-
     <!-- Toast Container -->
     <div class="toast-container" id="toast-container"></div>
 
@@ -1100,6 +1136,70 @@
       document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
           document.getElementById('confirm-modal').classList.remove('active');
+        }
+      });
+
+      // Backup & Restore
+      document.getElementById('backup-btn').addEventListener('click', async () => {
+        try {
+          const btn = document.getElementById('backup-btn');
+          setLoading(btn, true);
+          
+          const resp = await fetch('/api/backup');
+          const result = await resp.json();
+          
+          if (resp.ok) {
+            showToast(result.message);
+          } else {
+            showToast('Backup failed: ' + result.message, 'error');
+          }
+        } catch (err) {
+          showToast('Failed to start backup: ' + err, 'error');
+        } finally {
+          setLoading(document.getElementById('backup-btn'), false);
+        }
+      });
+
+      document.getElementById('restore-file').addEventListener('change', (e) => {
+        document.getElementById('restore-btn').disabled = !e.target.files.length;
+      });
+
+      document.getElementById('restore-btn').addEventListener('click', async () => {
+        const fileInput = document.getElementById('restore-file');
+        if (!fileInput.files.length) return;
+
+        const confirmed = await showConfirm(
+          'Restore Database',
+          'This will OVERWRITE all current settings, NVRs, and logs with the data from the file. This action cannot be undone. Are you sure?'
+        );
+
+        if (!confirmed) return;
+
+        const btn = document.getElementById('restore-btn');
+        setLoading(btn, true);
+
+        try {
+          const file = fileInput.files[0];
+          const text = await file.text();
+          const data = JSON.parse(text);
+
+          const resp = await fetch('/api/restore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+          });
+
+          const result = await resp.json();
+          if (resp.ok) {
+            showToast('Database restored successfully! Reloading...');
+            setTimeout(() => window.location.reload(), 2000);
+          } else {
+            showToast('Restore failed: ' + result.message, 'error');
+          }
+        } catch (err) {
+          showToast('Error during restore: ' + err, 'error');
+        } finally {
+          setLoading(btn, false);
         }
       });
     </script>
