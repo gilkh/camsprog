@@ -20,6 +20,10 @@
       <a class="link-logs" href="/logs">🧾 Logs</a>
       <a class="link-calendar" href="/calendar">📅 Calendar</a>
       <small id="last-updated">Last updated: —</small>
+      <div id="live-indicator" class="live-indicator" title="Connected to live updates">
+        <span class="live-dot"></span>
+        <span class="live-text">Live</span>
+      </div>
     </div>
   </header>
 
@@ -155,6 +159,7 @@
     let lastNvrs = []; // keep reference for search filtering
     let searchQuery = '';
     let activeStatusFilter = null; // 'Online', 'Offline', 'Warning', or null
+    let eventSource = null;
 
     const WEEK_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -403,74 +408,168 @@
       const all = Array.isArray(nvrsRaw) ? nvrsRaw : [];
       updateStats(all);
       const filtered = filterNvrs(all);
-      const nvrs = sortNvrs(filtered);
+      const sorted = sortNvrs(filtered);
       const tbody = document.getElementById('nvr-body');
-      tbody.innerHTML = '';
 
-      if (nvrs.length === 0) {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td colspan="12">
+      // 1. Handle empty state
+      if (sorted.length === 0) {
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="13">
           <div class="empty-state">
             <div class="empty-state-icon">📡</div>
             <h3>${searchQuery ? 'No matching NVRs' : 'No NVRs added yet'}</h3>
             <p>${searchQuery ? 'Try adjusting your search query.' : 'Click the "Add NVR" button to start monitoring your CCTV devices.'}</p>
           </div>
-        </td>`;
-        tbody.appendChild(tr);
+        </td></tr>`;
         return;
       }
 
-      for (const nvr of nvrs) {
-        const tr = document.createElement('tr');
-        tr.className = (nvr.status === 'Online') ? 'online' : 'offline';
+      // 2. Clear empty state or skeletons if they exist
+      if (tbody.querySelector('.empty-row') || tbody.querySelector('.skeleton-row')) {
+        tbody.innerHTML = '';
+      }
+
+      // 3. Smart Update: Map existing rows by IP
+      const existingRows = new Map();
+      tbody.querySelectorAll('tr[data-ip]').forEach(tr => {
+        existingRows.set(tr.dataset.ip, tr);
+      });
+
+      // 4. Update or Create Rows
+      sorted.forEach((nvr, index) => {
+        const ip = nvr.ip || '';
+        let tr = existingRows.get(ip);
+        const isNew = !tr;
+
+        if (isNew) {
+          tr = document.createElement('tr');
+          tr.dataset.ip = ip;
+          tbody.appendChild(tr); // temporary append to keep order logic simple below
+        }
+
+        // Update classes
+        const statusClass = (nvr.status === 'Online') ? 'online' : 'offline';
+        if (tr.className !== statusClass) tr.className = statusClass;
+
+        // Calculate recording status
         const expected = (nvr.recording_expected ?? null);
         const recCount = nvr.recording_count;
         const expectedInt = (expected !== null) ? Number(expected) : null;
         const recInt = (recCount !== undefined && recCount !== null && recCount !== 'Unknown' && recCount !== 'Offline') ? Number(recCount) : null;
         const statusText = (expectedInt === null || recInt === null || Number.isNaN(expectedInt) || Number.isNaN(recInt)) ? '-' : (recInt >= expectedInt ? 'OK' : 'Warning');
         const recDisplay = (recInt !== null && !Number.isNaN(recInt)) ? recInt : (recCount ?? '—');
-        tr.innerHTML = `
-            <td data-label="Name"><span class="nvr-name">${nvr.name ?? ''}</span></td>
-            <td data-label="IP Address">${renderIpCell(nvr.ip)}</td>
-            <td data-label="Password"><span class="password-cell" data-pw="${nvr.password || ''}" data-revealed="false" title="Click to reveal">${nvr.password ? '••••••' : '—'}</span></td>
-            <td data-label="Status">${getStatusBadge(nvr.status, nvr.camera_count)}</td>
-            <td data-label="Last Online">${nvr.last_online ? new Date(nvr.last_online * 1000).toLocaleString() : '—'}</td>
-            <td data-label="NVR Time">${renderNvrTimeCell(nvr.nvr_time)}</td>
-            <td data-label="Cameras">${nvr.camera_count ?? '—'}</td>
-            <td data-label="Channels"><div class="channel-list">${renderChannelStatuses(nvr.channel_statuses)}</div></td>
-            <td data-label="Recording">${recDisplay}</td>
-            <td data-label="Expected">${expected !== null ? expected : '—'}</td>
-            <td data-label="Rec Status">${getRecStatusBadge(statusText)}</td>
-            <td data-label="Type">${getTypeBadge(nvr.type)}</td>
-            <td>
-              <div class="action-row">
-                <button class="btn-edit" data-ip="${nvr.ip ?? ''}" data-tooltip="Edit">Edit</button>
-                <button class="btn-delete" data-ip="${nvr.ip ?? ''}" data-tooltip="Delete">Del</button>
-                <button class="btn-sync" data-ip="${nvr.ip ?? ''}" data-tooltip="Sync NVR Time">Sync</button>
-              </div>
-            </td>
-          `;
-        tbody.appendChild(tr);
+
+        // Build internal HTML chunks for comparison
+        const nameHtml = `<span class="nvr-name">${escapeHtml(nvr.name ?? '')}</span>`;
+        const ipHtml = renderIpCell(nvr.ip);
+        
+        // Handle password cell specifically to preserve revealed state
+        const oldPwCell = tr.querySelector('.password-cell');
+        const wasRevealed = oldPwCell ? oldPwCell.dataset.revealed === 'true' : false;
+        const pwText = wasRevealed ? (nvr.password || '') : (nvr.password ? '••••••' : '—');
+        const pwHtml = `<span class="password-cell" data-pw="${escapeHtml(nvr.password || '')}" data-revealed="${wasRevealed}" title="Click to reveal">${pwText}</span>`;
+        
+        const statusHtml = getStatusBadge(nvr.status, nvr.camera_count);
+        const lastOnlineHtml = nvr.last_online ? new Date(nvr.last_online * 1000).toLocaleString() : '—';
+        const nvrTimeHtml = renderNvrTimeCell(nvr.nvr_time);
+        const camCountHtml = nvr.camera_count ?? '—';
+        const channelsHtml = `<div class="channel-list">${renderChannelStatuses(nvr.channel_statuses)}</div>`;
+        const recStatusBadgeHtml = getRecStatusBadge(statusText);
+        const typeBadgeHtml = getTypeBadge(nvr.type);
+        const actionsHtml = `
+          <div class="action-row">
+            <button class="btn-edit" data-ip="${escapeHtml(ip)}" data-tooltip="Edit">Edit</button>
+            <button class="btn-delete" data-ip="${escapeHtml(ip)}" data-tooltip="Delete">Del</button>
+            <button class="btn-sync" data-ip="${escapeHtml(ip)}" data-tooltip="Sync NVR Time">Sync</button>
+          </div>
+        `;
+
+        // Update cells only if changed (or if row is new)
+        const cells = [
+          { label: 'Name', html: nameHtml },
+          { label: 'IP Address', html: ipHtml },
+          { label: 'Password', html: pwHtml },
+          { label: 'Status', html: statusHtml },
+          { label: 'Last Online', html: lastOnlineHtml },
+          { label: 'NVR Time', html: nvrTimeHtml },
+          { label: 'Cameras', html: camCountHtml },
+          { label: 'Channels', html: channelsHtml },
+          { label: 'Recording', html: recDisplay },
+          { label: 'Expected', html: expected !== null ? expected : '—' },
+          { label: 'Rec Status', html: recStatusBadgeHtml },
+          { label: 'Type', html: typeBadgeHtml },
+          { label: 'Actions', html: actionsHtml }
+        ];
+
+        if (isNew || tr.cells.length !== cells.length) {
+          tr.innerHTML = cells.map(c => `<td data-label="${c.label}">${c.html}</td>`).join('');
+        } else {
+          cells.forEach((c, i) => {
+            const cell = tr.cells[i];
+            if (cell.innerHTML !== c.html) {
+              cell.innerHTML = c.html;
+              // Apply dynamic pulse animation
+              cell.classList.remove('cell-update-pulse');
+              void cell.offsetWidth; // Trigger reflow
+              cell.classList.add('cell-update-pulse');
+            }
+          });
+        }
+
+        // 5. Ensure correct order in DOM
+        if (tbody.children[index] !== tr) {
+          tbody.insertBefore(tr, tbody.children[index]);
+        }
+
+        existingRows.delete(ip);
+      });
+
+      // 6. Remove rows that are no longer in the sorted list
+      existingRows.forEach(tr => tr.remove());
+    }
+
+    function connectSSE() {
+      if (eventSource) {
+        eventSource.close();
       }
+      
+      const liveIndicator = document.getElementById('live-indicator');
+      
+      eventSource = new EventSource('/api/events');
+      
+      eventSource.onopen = () => {
+        liveIndicator.classList.add('connected');
+      };
+      
+      eventSource.onmessage = (e) => {
+        try {
+          const nvrsRaw = JSON.parse(e.data);
+          lastNvrs = Array.isArray(nvrsRaw) ? nvrsRaw : [];
+          renderTable(lastNvrs);
+          
+          const stamp = new Date().toLocaleTimeString();
+          const lu = document.getElementById('last-updated');
+          if (lu) lu.textContent = 'Live: ' + stamp;
+        } catch (err) {
+          console.error("SSE parse error", err);
+        }
+      };
+      
+      eventSource.onerror = () => {
+        liveIndicator.classList.remove('connected');
+        // Browser handles reconnection automatically for EventSource
+      };
     }
 
     async function refreshData() {
+      // Manual refresh still uses polling but triggers a server-side poll
       try {
-        if (controller) { try { controller.abort(); } catch (err) { } }
-        controller = new AbortController();
         pending = true;
-        const res = await fetch('/api/nvrs', { signal: controller.signal });
-        const nvrsRaw = await res.json();
-        lastNvrs = Array.isArray(nvrsRaw) ? nvrsRaw : [];
-        renderTable(lastNvrs);
-        const stamp = new Date().toLocaleTimeString();
-        const lu = document.getElementById('last-updated');
-        if (lu) lu.textContent = 'Updated: ' + stamp;
+        await fetch('/api/refresh', { method: 'POST' });
+        // The SSE will catch the update automatically when the server finishes.
       } catch (e) {
         // silent
       } finally {
         pending = false;
-        scheduleNext();
       }
     }
 
@@ -501,8 +600,7 @@
     }
 
     function scheduleNext() {
-      if (refreshTimer) { clearTimeout(refreshTimer); }
-      refreshTimer = setTimeout(() => { if (!pending) refreshData(); }, refreshIntervalSec * 1000);
+      // No-op, we use SSE now.
     }
 
     // Password reveal toggle
@@ -560,9 +658,8 @@
     window.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('nvr-modal-overlay').hidden = true;
       setupSorting();
-      await loadRefreshIntervalAndStart();
-      await refreshData();
-      await forceServerRefreshAndReload();
+      connectSSE();
+      // await forceServerRefreshAndReload(); // SSE will pick up initial state
     });
 
     // If tab gains focus, re-read settings to pick up interval changes

@@ -421,8 +421,8 @@
             <div class="form-group">
               <label>Preset</label>
               <select id="refresh-preset">
-                <option value="1">1 second (Real-time)</option>
-                <option value="10">10 seconds</option>
+                <option value="5">5 seconds (Aggressive)</option>
+                <option value="15">15 seconds (Balanced)</option>
                 <option value="30">30 seconds</option>
                 <option value="60">1 minute</option>
                 <option value="300">5 minutes</option>
@@ -896,8 +896,8 @@
           const s = await res.json();
 
           // Refresh interval
-          const ri = Number(s.refresh_interval ?? 60);
-          const presets = [1, 10, 30, 60, 300];
+          const ri = Number(s.refresh_interval ?? 15);
+          const presets = [5, 15, 30, 60, 300];
           const presetSelect = document.getElementById('refresh-preset');
           if (presets.includes(ri)) {
             presetSelect.value = String(ri);
@@ -939,9 +939,9 @@
         e.preventDefault();
         const btn = document.getElementById('refresh-save-btn');
         const preset = document.getElementById('refresh-preset').value;
-        let interval = 60;
+        let interval = 15;
         if (preset === 'custom') {
-          interval = Number(document.getElementById('refresh-custom').value || 60);
+          interval = Number(document.getElementById('refresh-custom').value || 15);
         } else {
           interval = Number(preset);
         }

@@ -258,6 +258,50 @@ header h1::before {
   font-weight: 400;
 }
 
+.live-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-glass);
+  padding: 4px 10px;
+  border-radius: 100px;
+  border: 1px solid var(--border-subtle);
+  opacity: 0.5;
+  transition: all var(--transition-medium);
+}
+
+.live-indicator.connected {
+  opacity: 1;
+  border-color: var(--accent-green-soft);
+  background: var(--accent-green-soft);
+}
+
+.live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: all var(--transition-medium);
+}
+
+.live-indicator.connected .live-dot {
+  background: var(--accent-green);
+  box-shadow: 0 0 8px var(--accent-green-glow);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.live-text {
+  font-size: 0.714rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.live-indicator.connected .live-text {
+  color: var(--accent-green);
+}
+
 /* ─── Main Content ─── */
 main {
   position: relative;
@@ -599,6 +643,16 @@ tr.offline td {
 .status-dot.offline {
   background: var(--accent-red);
   box-shadow: 0 0 6px var(--accent-red-glow);
+}
+
+/* Dynamic Update Highlight */
+@keyframes cellPulse {
+  0% { background-color: var(--accent-primary-hover); color: white; }
+  100% { background-color: transparent; }
+}
+
+.cell-update-pulse {
+  animation: cellPulse 1.5s ease-out;
 }
 
 /* ─── Recording Status Badges ─── */

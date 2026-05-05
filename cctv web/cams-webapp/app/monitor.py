@@ -64,7 +64,7 @@ def ping_ip(ip: str, timeout_ms: int = 1000) -> bool:
 
 
 class MonitorState:
-    def __init__(self, poll_interval: int = 60, db=None):
+    def __init__(self, poll_interval: int = 15, db=None):
         self.poll_interval = poll_interval
         self.lock = threading.Lock()
         self.running = False
@@ -72,6 +72,8 @@ class MonitorState:
         self.nvrs: List[Dict[str, Any]] = []
         self.db = db
         self._first_heartbeat_ts: float | None = None  # timestamp when monitoring first started tracking
+        self._listeners: List[threading.Event] = []
+        self._listeners_lock = threading.Lock()
 
     def load(self):
         if self.db is not None:
@@ -369,6 +371,19 @@ class MonitorState:
         self._write_state()
         # Update heartbeat so we can detect system-off gaps
         self._write_heartbeat(now_ts)
+        self._notify_listeners()
+
+    def _notify_listeners(self):
+        with self._listeners_lock:
+            for event in self._listeners:
+                event.set()
+            self._listeners.clear()
+
+    def wait_for_change(self, timeout: float = 30.0):
+        event = threading.Event()
+        with self._listeners_lock:
+            self._listeners.append(event)
+        return event.wait(timeout)
 
     def _write_back(self):
         try:

@@ -4,8 +4,9 @@ import html
 import csv
 import io
 import threading
+import asyncio
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, HTMLResponse, Response
+from fastapi.responses import JSONResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from .monitor import MonitorState, ping_ip
@@ -42,7 +43,7 @@ TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
-monitor = MonitorState(poll_interval=60)
+monitor = MonitorState(poll_interval=15)
 
 
 def _normalize_smtp_to(value):
@@ -1347,7 +1348,7 @@ def startup_event():
     monitor.db = app.state.db
     try:
         s = app.state.db["settings"].find_one({"_id": "global"}) or {}
-        ri = int(s.get("refresh_interval") or 60)
+        ri = int(s.get("refresh_interval") or 15)
         if ri >= 1:
             monitor.poll_interval = ri
     except Exception:
@@ -1410,6 +1411,39 @@ def home(request: Request):
 @app.get("/api/nvrs")
 def api_nvrs():
     return JSONResponse(monitor.get_snapshot())
+
+
+@app.get("/api/events")
+async def api_events(request: Request):
+    """
+    Server-Sent Events endpoint that streams NVR data whenever it updates.
+    """
+    async def event_generator():
+        # Send initial state
+        data = monitor.get_snapshot()
+        yield f"data: {json.dumps(data)}\n\n"
+        
+        while True:
+            if await request.is_disconnected():
+                break
+            
+            # Wait for the monitor to finish a refresh cycle
+            # This is a blocking call in a thread, so we run it in a separate thread to not block the event loop
+            # or just use a simple sleep for now if wait_for_change is not async-friendly.
+            # But wait, wait_for_change is thread-safe.
+            changed = await asyncio.to_thread(monitor.wait_for_change, timeout=30.0)
+            
+            if await request.is_disconnected():
+                break
+                
+            if changed:
+                data = monitor.get_snapshot()
+                yield f"data: {json.dumps(data)}\n\n"
+            else:
+                # Heartbeat to keep connection alive
+                yield ": heartbeat\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/api/nvrs/export")
