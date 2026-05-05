@@ -16,10 +16,10 @@ if exist "PORT.txt" (
     for /f "tokens=*" %%i in ('powershell -NoProfile -Command "$p='%SAVED_PORT%'; if ($p -match '^\d+$' -and !(Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue)) { Write-Host $p }"') do set "PORT=%%i"
 )
 
-if "%PORT%"=="" (
-    for /f "tokens=*" %%i in ('powershell -NoProfile -Command "$listener = [System.Net.Sockets.TcpListener]0; $listener.Start(); $port = $listener.LocalEndpoint.Port; $listener.Stop(); Write-Host $port"') do set "PORT=%%i"
-    echo %PORT%>PORT.txt
-)
+if not "%PORT%"=="" goto :PORT_FOUND
+for /f "tokens=*" %%i in ('powershell -NoProfile -Command "$listener = [System.Net.Sockets.TcpListener]0; $listener.Start(); $port = $listener.LocalEndpoint.Port; $listener.Stop(); Write-Host $port"') do set "PORT=%%i"
+echo %PORT%>PORT.txt
+:PORT_FOUND
 set "APP_DIR=%~dp0cams-webapp"
 set "URL=http://%LAN_HOST%:%PORT%/"
 
@@ -42,9 +42,10 @@ echo Starting Cams WebApp on %URL%
 echo LAN access enabled on port %PORT% (bound to %BIND_HOST%).
 
 REM Stop any stale server already using this port, so old instances do not serve old pages.
-powershell -NoProfile -Command "$p=%PORT%; $conns=Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue; if ($conns) { $procIds = $conns | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($procId in $procIds) { try { Stop-Process -Id $procId -Force -ErrorAction Stop; Write-Host ('Stopped stale process PID ' + $procId + ' on port ' + $p) } catch {} } }"
+powershell -NoProfile -Command "$p='%PORT%'; if ($p -match '^\d+$') { $conns=Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue; if ($conns) { $procIds = $conns | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($procId in $procIds) { try { Stop-Process -Id $procId -Force -ErrorAction Stop; Write-Host ('Stopped stale process PID ' + $procId + ' on port ' + $p) } catch {} } } }"
 
-start "Cams WebApp Server" %PY% -m uvicorn app.main:app --host %BIND_HOST% --port %PORT% --app-dir "%APP_DIR%"
+REM Use cmd /k so the window stays open if the server crashes, allowing you to see the error.
+start "Cams WebApp Server" cmd /k "%PY% -m uvicorn app.main:app --host %BIND_HOST% --port %PORT% --app-dir "%APP_DIR%""
 
 powershell -NoProfile -Command "$url='%URL%'; $deadline=(Get-Date).AddSeconds(25); do { try { Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 | Out-Null; break } catch { Start-Sleep -Milliseconds 500 } } while ((Get-Date) -lt $deadline)"
 
