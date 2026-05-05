@@ -38,6 +38,18 @@ if exist ".venv\Scripts\python.exe" (
   set "PY=python"
 )
 
+REM Ensure dependencies are installed
+%PY% -c "import uvicorn, fastapi" >nul 2>&1
+if errorlevel 1 (
+    echo [Cams] Missing dependencies. Attempting to install...
+    %PY% -m pip install -r "%APP_DIR%\requirements.txt"
+    if errorlevel 1 (
+        echo [ERROR] Failed to install dependencies.
+        pause
+        exit /b 1
+    )
+)
+
 echo Starting Cams WebApp on %URL%
 echo LAN access enabled on port %PORT% (bound to %BIND_HOST%).
 
