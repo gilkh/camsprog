@@ -371,6 +371,74 @@ main {
   box-shadow: var(--shadow-glow);
 }
 
+/* Split Card Styling */
+.stat-card.split-card {
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  padding: 0 0 0 20px !important; /* Vertical padding moved to halves */
+}
+
+@media (max-width: 480px) {
+  .stat-card.split-card {
+    padding: 0 0 0 8px !important;
+    gap: 6px !important;
+  }
+}
+
+.stat-card.split-card .stat-icon {
+  flex-shrink: 0;
+}
+
+.split-container {
+  display: flex;
+  flex: 1;
+  height: 100%;
+  align-self: stretch;
+}
+
+.split-half {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 18px 4px; /* Vertical padding here for full-height background */
+  transition: all var(--transition-fast);
+  cursor: pointer;
+  user-select: none;
+}
+
+@media (max-width: 480px) {
+  .split-half {
+    padding: 10px 4px;
+  }
+}
+
+.split-half:hover {
+  background: var(--bg-hover);
+}
+
+.split-divider {
+  width: 1px;
+  background: var(--border-subtle);
+  height: 60%;
+  align-self: center;
+}
+
+.split-half.active {
+  background: var(--accent-amber-soft);
+}
+
+.split-half.active .stat-value {
+  color: var(--accent-amber);
+}
+
+.split-half.active .stat-label {
+  color: var(--accent-amber);
+  opacity: 0.8;
+}
+
 .stat-card.active[data-filter="Online"] {
   border-color: var(--accent-green);
   background: var(--accent-green-soft);
@@ -842,11 +910,12 @@ a.ip-link:focus-visible {
 }
 
 .nvr-time-shifted {
-  text-decoration-line: underline;
-  text-decoration-style: solid;
-  text-decoration-color: var(--accent-red);
-  text-decoration-thickness: 2px;
-  text-underline-offset: 3px;
+  border-bottom: 2px solid var(--accent-red);
+  display: inline-block;
+  line-height: 1.2;
+  white-space: nowrap;
+  vertical-align: bottom;
+  width: fit-content;
 }
 
 /* ─── NVR Name cell ─── */
@@ -949,8 +1018,8 @@ a.ip-link:focus-visible {
 
 /* ─── Responsive & Mobile Optimization ─── */
 @media (max-width: 1024px) {
-  main { padding: 16px; }
-  .stats-bar { grid-template-columns: repeat(2, 1fr); }
+  main { padding: 12px; }
+  .stats-bar { grid-template-columns: repeat(2, 1fr); gap: 12px; }
 }
 
 @media (max-width: 768px) {
@@ -1099,7 +1168,7 @@ a.ip-link:focus-visible {
     opacity: 0.8;
   }
 
-  td span:not(.channel-pill), td a, td div:not(.channel-list) {
+  td span:not(.channel-pill):not(.nvr-time-shifted), td a, td div:not(.channel-list) {
     font-size: 0.75rem;
     width: 100%;
     overflow: hidden;
@@ -1150,15 +1219,16 @@ a.ip-link:focus-visible {
 }
 
 @media (max-width: 480px) {
+  main { padding: 4px; }
   .stats-bar {
     grid-template-columns: repeat(2, 1fr);
-    gap: 6px;
-    margin-bottom: 10px;
+    gap: 12px;
+    margin-bottom: 15px;
   }
   
   .stat-card {
-    padding: 6px 8px;
-    gap: 6px;
+    padding: 10px 12px;
+    gap: 8px;
   }
 
   .stat-icon {

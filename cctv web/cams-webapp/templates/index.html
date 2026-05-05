@@ -47,11 +47,18 @@
           <span class="stat-label">Offline</span>
         </div>
       </div>
-      <div class="stat-card clickable" data-filter="Warning">
+      <div class="stat-card split-card">
         <div class="stat-icon recording">⏺</div>
-        <div class="stat-info">
-          <span class="stat-value" id="stat-warnings">—</span>
-          <span class="stat-label">Warnings</span>
+        <div class="split-container">
+          <div class="split-half clickable" data-filter="TimeWarning">
+            <span class="stat-value" id="stat-time-warnings">—</span>
+            <span class="stat-label">Time</span>
+          </div>
+          <div class="split-divider"></div>
+          <div class="split-half clickable" data-filter="Warning">
+            <span class="stat-value" id="stat-warnings">—</span>
+            <span class="stat-label">Rec</span>
+          </div>
         </div>
       </div>
     </div>
@@ -323,7 +330,7 @@
     function isNvrTimeShifted(value) {
       const parsedMs = parseNvrTimeForSort(value);
       if (parsedMs === null) return false;
-      return Math.abs(Date.now() - parsedMs) > (5 * 60 * 1000);
+      return Math.abs(Date.now() - parsedMs) > (2 * 60 * 1000);
     }
 
     function renderNvrTimeCell(value) {
@@ -331,7 +338,7 @@
       if (!raw.trim()) return '—';
       const safeValue = escapeHtml(raw);
       if (!isNvrTimeShifted(raw)) return safeValue;
-      return `<span class="nvr-time-shifted" title="NVR time differs by more than 5 minutes">${safeValue}</span>`;
+      return `<span class="nvr-time-shifted" title="NVR time differs by more than 2 minutes">${safeValue}</span>`;
     }
 
     function updateStats(nvrs) {
@@ -339,17 +346,24 @@
       const online = nvrs.filter(n => n.status === 'Online').length;
       const offline = total - online;
       let warnings = 0;
+      let timeWarnings = 0;
       for (const nvr of nvrs) {
+        // Camera/Recording warnings
         const expected = parseNumeric(nvr.recording_expected);
         const rec = parseNumeric(nvr.recording_count);
         if (expected !== null && rec !== null && !Number.isNaN(expected) && !Number.isNaN(rec) && rec < expected) {
           warnings++;
+        }
+        // Time warnings
+        if (isNvrTimeShifted(nvr.nvr_time)) {
+          timeWarnings++;
         }
       }
       document.getElementById('stat-total').textContent = total;
       document.getElementById('stat-online').textContent = online;
       document.getElementById('stat-offline').textContent = offline;
       document.getElementById('stat-warnings').textContent = warnings;
+      document.getElementById('stat-time-warnings').textContent = timeWarnings;
     }
 
     function filterNvrs(nvrs) {
@@ -375,6 +389,8 @@
             const rec = parseNumeric(n.recording_count);
             return expected !== null && rec !== null && rec < expected;
           });
+        } else if (activeStatusFilter === 'TimeWarning') {
+          filtered = filtered.filter(n => isNvrTimeShifted(n.nvr_time));
         } else {
           filtered = filtered.filter(n => n.status === activeStatusFilter);
         }
@@ -523,17 +539,18 @@
 
     document.getElementById('refresh').addEventListener('click', refreshData);
 
-    // Stats Cards Filtering
-    document.querySelectorAll('.stat-card.clickable').forEach(card => {
-      card.addEventListener('click', () => {
-        const filter = card.dataset.filter;
+    // Stats Cards Filtering (including split zones)
+    document.querySelectorAll('.clickable[data-filter]').forEach(el => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation(); // Prevent bubble to parent stat-card if any
+        const filter = el.dataset.filter;
         if (activeStatusFilter === filter) {
           activeStatusFilter = null;
-          card.classList.remove('active');
+          el.classList.remove('active');
         } else {
-          document.querySelectorAll('.stat-card.clickable').forEach(c => c.classList.remove('active'));
+          document.querySelectorAll('.clickable[data-filter]').forEach(c => c.classList.remove('active'));
           activeStatusFilter = filter;
-          card.classList.add('active');
+          el.classList.add('active');
         }
         renderTable(lastNvrs);
       });
