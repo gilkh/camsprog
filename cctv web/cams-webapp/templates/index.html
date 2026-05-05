@@ -507,10 +507,6 @@
             const cell = tr.cells[i];
             if (cell.innerHTML !== c.html) {
               cell.innerHTML = c.html;
-              // Apply dynamic pulse animation
-              cell.classList.remove('cell-update-pulse');
-              void cell.offsetWidth; // Trigger reflow
-              cell.classList.add('cell-update-pulse');
             }
           });
         }

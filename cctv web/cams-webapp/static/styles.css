@@ -645,16 +645,6 @@ tr.offline td {
   box-shadow: 0 0 6px var(--accent-red-glow);
 }
 
-/* Dynamic Update Highlight */
-@keyframes cellPulse {
-  0% { background-color: var(--accent-primary-hover); color: white; }
-  100% { background-color: transparent; }
-}
-
-.cell-update-pulse {
-  animation: cellPulse 1.5s ease-out;
-}
-
 /* ─── Recording Status Badges ─── */
 .badge-ok {
   color: var(--accent-green) !important;
