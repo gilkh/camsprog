@@ -74,6 +74,9 @@ class MonitorState:
         self._first_heartbeat_ts: float | None = None  # timestamp when monitoring first started tracking
         self._listeners: List[threading.Event] = []
         self._listeners_lock = threading.Lock()
+        self.last_refresh_duration: float = 0.0
+        self.refresh_count: int = 0
+        self.last_refresh_finish: float = 0.0
 
     def load(self):
         if self.db is not None:
@@ -293,12 +296,19 @@ class MonitorState:
 
     def _loop(self):
         while self.running:
+            start_time = time.time()
             try:
                 self._refresh()
             except Exception:
                 # Keep loop alive
                 pass
-            time.sleep(self.poll_interval)
+            end_time = time.time()
+            with self.lock:
+                self.last_refresh_duration = end_time - start_time
+                self.refresh_count += 1
+                self.last_refresh_finish = end_time
+            sleep_time = max(0, self.poll_interval - (time.time() - start_time))
+            time.sleep(sleep_time)
 
     def _refresh(self):
         now_ts = time.time()

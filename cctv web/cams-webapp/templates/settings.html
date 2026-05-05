@@ -663,6 +663,37 @@
             </button>
           </div>
         </div>
+
+        <!-- System Diagnostics -->
+        <div class="card">
+          <div class="card-header">
+            <div class="icon" style="background: #e2e8f0;">&#128202;</div>
+            <h2>System Diagnostics</h2>
+          </div>
+          <p style="margin: 0 0 16px 0; color: var(--text-muted); font-size: 14px;">
+            Monitor the performance of your NVR polling cycle to identify potential bottlenecks.
+          </p>
+          <div id="diagnostics-panel" style="font-size: 13px;">
+             <div style="display: flex; justify-content: space-between; margin-bottom: 8px; padding: 8px; background: #f8fafc; border-radius: 8px;">
+                <span>Last Refresh Duration:</span>
+                <span id="diag-duration" style="font-weight: 700;">—</span>
+             </div>
+             <div style="display: flex; justify-content: space-between; margin-bottom: 8px; padding: 8px; background: #f8fafc; border-radius: 8px;">
+                <span>NVRs Monitored:</span>
+                <span id="diag-nvr-count" style="font-weight: 700;">—</span>
+             </div>
+             <div style="display: flex; justify-content: space-between; margin-bottom: 8px; padding: 8px; background: #f8fafc; border-radius: 8px;">
+                <span>Status:</span>
+                <span id="diag-status" style="font-weight: 700;">—</span>
+             </div>
+             <div id="diag-warning" style="display:none; margin-top: 10px; padding: 10px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; color: #991b1b;">
+                <strong>⚠️ Bottleneck Detected:</strong> The polling cycle is taking longer than the set interval. Consider increasing the refresh interval or checking network latency.
+             </div>
+          </div>
+          <div class="form-actions" style="border: none; padding: 10px 0 0 0;">
+            <button class="btn btn-secondary" id="refresh-diagnostics">Refresh Diagnostics</button>
+          </div>
+        </div>
       </div>
     </main>
     <!-- Toast Container -->
@@ -1129,8 +1160,47 @@
         }
       });
 
+      // Diagnostics
+      async function fetchDiagnostics() {
+        try {
+          const res = await fetch('/api/diagnostics');
+          const data = await res.json();
+          
+          document.getElementById('diag-duration').textContent = (data.last_refresh_duration ?? 0) + 's';
+          document.getElementById('diag-nvr-count').textContent = data.nvr_count ?? 0;
+          
+          const statusEl = document.getElementById('diag-status');
+          const warningEl = document.getElementById('diag-warning');
+          
+          if (!data || data.last_refresh_duration === undefined) {
+            statusEl.textContent = 'Initializing...';
+            statusEl.style.color = 'var(--text-muted)';
+            warningEl.style.display = 'none';
+          } else if (data.is_overrun) {
+            statusEl.textContent = '⚠️ Bottleneck';
+            statusEl.style.color = '#ef4444';
+            warningEl.style.display = 'block';
+          } else if (data.last_refresh_duration > data.poll_interval * 0.8) {
+            statusEl.textContent = '🟡 Near Limit';
+            statusEl.style.color = '#f59e0b';
+            warningEl.style.display = 'none';
+          } else {
+            statusEl.textContent = '🟢 Healthy';
+            statusEl.style.color = '#10b981';
+            warningEl.style.display = 'none';
+          }
+        } catch (e) {
+          console.error('Failed to fetch diagnostics', e);
+        }
+      }
+
+      document.getElementById('refresh-diagnostics').addEventListener('click', fetchDiagnostics);
+
       // Load settings on page load
-      window.addEventListener('DOMContentLoaded', loadSettings);
+      window.addEventListener('DOMContentLoaded', () => {
+        loadSettings();
+        fetchDiagnostics();
+      });
 
       // Close modal on Escape key
       document.addEventListener('keydown', (e) => {

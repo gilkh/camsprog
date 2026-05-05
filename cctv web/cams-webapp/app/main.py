@@ -1428,9 +1428,6 @@ async def api_events(request: Request):
                 break
             
             # Wait for the monitor to finish a refresh cycle
-            # This is a blocking call in a thread, so we run it in a separate thread to not block the event loop
-            # or just use a simple sleep for now if wait_for_change is not async-friendly.
-            # But wait, wait_for_change is thread-safe.
             changed = await asyncio.to_thread(monitor.wait_for_change, timeout=30.0)
             
             if await request.is_disconnected():
@@ -1444,6 +1441,26 @@ async def api_events(request: Request):
                 yield ": heartbeat\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.get("/api/diagnostics")
+def api_get_diagnostics():
+    """Returns monitoring performance metrics."""
+    with monitor.lock:
+        # Use getattr with defaults in case the server hasn't restarted with the new MonitorState attributes
+        duration = getattr(monitor, "last_refresh_duration", 0.0)
+        count = getattr(monitor, "refresh_count", 0)
+        finish = getattr(monitor, "last_refresh_finish", 0.0)
+        
+        return {
+            "last_refresh_duration": round(duration, 2),
+            "refresh_count": count,
+            "last_refresh_finish": finish,
+            "poll_interval": getattr(monitor, "poll_interval", 15),
+            "nvr_count": len(getattr(monitor, "nvrs", [])),
+            "is_overrun": duration > getattr(monitor, "poll_interval", 15),
+            "timestamp": time.time()
+        }
 
 
 @app.get("/api/nvrs/export")
