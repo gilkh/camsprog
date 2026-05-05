@@ -926,32 +926,35 @@ a.ip-link:focus-visible {
 @media (max-width: 768px) {
   header {
     height: auto;
-    padding: 10px 16px;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 8px;
+    padding: 8px 16px;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
   }
 
-  header h1 { font-size: 1.1rem; }
+  header h1 { font-size: 0.95rem; margin: 0; }
 
   /* Hide secondary nav links on mobile */
-  .actions a[href="/calendar"],
-  .actions a[href="/logs"],
-  .actions a[href="/settings"] {
+  .actions a.link-calendar,
+  .actions a.link-logs,
+  .actions a.link-settings,
+  #last-updated {
     display: none !important;
   }
 
   .actions {
-    width: 100%;
+    width: auto;
     display: flex;
     flex-direction: row;
-    justify-content: flex-end;
+    align-items: center;
     gap: 6px;
   }
 
-  .actions button, .actions a {
+  .actions button {
     width: auto;
-    padding: 8px 12px;
+    padding: 6px 10px;
+    font-size: 0.75rem;
   }
 
   .table-header {
