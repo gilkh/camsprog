@@ -5,7 +5,8 @@ cd /d "%~dp0"
 echo [Cams Launcher v2] File: %~f0
 
 REM Configure bind host/port (edit if needed)
-set "LAN_HOST=192.168.17.10"
+REM Automatically detect local IP address
+for /f "tokens=*" %%i in ('powershell -NoProfile -Command "$ip = (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } | Select-Object -First 1).IPv4Address[0].IPAddress; if (!$ip) { $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notmatch '^127\.' } | Select-Object -First 1).IPAddress }; if (!$ip) { $ip = '127.0.0.1' }; Write-Host $ip"') do set "LAN_HOST=%%i"
 REM Bind directly to LAN_HOST so Uvicorn shows your LAN IP in startup logs.
 set "BIND_HOST=%LAN_HOST%"
 set "PORT=8000"
