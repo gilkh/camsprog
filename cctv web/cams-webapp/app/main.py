@@ -83,27 +83,41 @@ def _normalize_smtp_to(value):
 def _load_settings_from_file():
     if not os.path.exists(CONFIG_PATH):
         return {}
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
+    # Try utf-8-sig first (handles BOM produced by some editors/old code),
+    # fall back to plain utf-8, then latin-1 as last resort.
+    for enc in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            with open(CONFIG_PATH, "r", encoding=enc) as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return {}
+            cfg = data.get("config")
+            if isinstance(cfg, dict):
+                return cfg
             return {}
-        cfg = data.get("config")
-        if isinstance(cfg, dict):
-            return cfg
-        return {}
-    except Exception:
-        return {}
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+        except Exception:
+            return {}
+    return {}
 
 
 def _save_settings_to_file(update: dict):
     try:
         data = {}
         if os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-            if isinstance(loaded, dict):
-                data = loaded
+            # Read with BOM-tolerant encoding
+            for enc in ("utf-8-sig", "utf-8", "latin-1"):
+                try:
+                    with open(CONFIG_PATH, "r", encoding=enc) as f:
+                        loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        data = loaded
+                    break
+                except (UnicodeDecodeError, UnicodeError):
+                    continue
+                except Exception:
+                    break
         cfg = data.get("config")
         if not isinstance(cfg, dict):
             cfg = {}
@@ -111,11 +125,13 @@ def _save_settings_to_file(update: dict):
             cfg[key] = value
         data["config"] = cfg
         tmp_path = CONFIG_PATH + ".tmp"
+        # Write without BOM so new files are plain utf-8
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
         os.replace(tmp_path, CONFIG_PATH)
     except Exception:
         pass
+
 
 
 def _get_merged_settings() -> dict:
