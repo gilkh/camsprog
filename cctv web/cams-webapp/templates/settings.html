@@ -3,6 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📹</text></svg>" />
+    <link rel="stylesheet" href="/static/header.css" />
     <title>Settings - Cams WebApp</title>
     <style>
       :root {
@@ -28,37 +30,7 @@
         color: var(--text);
         line-height: 1.5;
       }
-      header {
-        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-        color: #fff;
-        padding: 16px 24px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-      }
-      header h1 {
-        font-size: 22px;
-        margin: 0;
-        font-weight: 600;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-      }
-      .actions { display: flex; gap: 12px; align-items: center; }
-      .btn-back {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        color: #e2e8f0;
-        text-decoration: none;
-        padding: 10px 16px;
-        border: 1px solid #334155;
-        border-radius: var(--radius);
-        transition: all 0.2s;
-        font-weight: 500;
-      }
-      .btn-back:hover { background: #334155; border-color: #475569; }
+      /* Unified header rules are in header.css */
       main {
         max-width: 1200px;
         margin: 0 auto;
@@ -390,22 +362,43 @@
       }
     </style>
   </head>
-  <body>
+  <body class="page-settings">
     <header>
-      <h1>
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
-          <circle cx="12" cy="12" r="3"></circle>
-        </svg>
-        Settings
-      </h1>
-      <div class="actions">
-        <a class="btn-back" href="/">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M19 12H5M12 19l-7-7 7-7"></path>
-          </svg>
-          Back to Dashboard
-        </a>
+      <div class="nav-container">
+        <div class="nav-left">
+          <a href="/" class="brand">
+            <span class="brand-icon">📹</span>
+            <h1 class="brand-name" style="margin: 0; display: inline-block;">Cams Control</h1>
+          </a>
+          <nav class="nav-links">
+            <a id="nav-dashboard" class="nav-link" href="/">🖥 Dashboard</a>
+            <a id="nav-calendar" class="nav-link" href="/calendar">📅 Calendar</a>
+            <a id="nav-logs" class="nav-link" href="/logs">🧾 Logs</a>
+            <a id="nav-settings" class="nav-link" href="/settings">⚙ Settings</a>
+          </nav>
+        </div>
+        
+        <div class="nav-right">
+          <!-- Dashboard actions (visible on body.page-dashboard) -->
+          <div id="dashboard-actions" class="header-actions">
+            <button id="btn-add-nvr">+ Add NVR</button>
+            <button id="refresh">↻ Refresh</button>
+            <small id="last-updated">Last updated: —</small>
+            <div id="live-indicator" class="live-indicator" title="Connected to live updates">
+              <span class="live-dot"></span>
+              <span class="live-text">Live</span>
+            </div>
+          </div>
+
+          <!-- Logs actions (visible on body.page-logs) -->
+          <div id="logs-actions" class="header-actions">
+            <small>Updated: <span id="last-refresh-time">--:--:--</span></small>
+            <div id="logs-live-indicator" class="live-indicator connected" title="Live status">
+              <span class="live-dot"></span>
+              <span id="live-status" class="live-text">Live</span>
+            </div>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -548,6 +541,37 @@
                 <input type="checkbox" id="email-enabled" checked hidden />
               </div>
               <div class="help-text">Turn this off to block all outgoing emails without removing SMTP settings</div>
+              
+              <div id="email-sub-options" style="margin-top: 16px; margin-left: 20px; padding-left: 16px; border-left: 2px solid var(--border); transition: opacity 0.3s, pointer-events 0.3s;">
+                <div class="form-group" style="margin-bottom: 12px;">
+                  <div class="toggle-wrapper">
+                    <div class="toggle active" id="email-nvr-offline-toggle"></div>
+                    <span class="toggle-label">Notify when an NVR goes offline (Critical)</span>
+                    <input type="checkbox" id="email-nvr-offline" checked hidden />
+                  </div>
+                </div>
+                <div class="form-group" style="margin-bottom: 12px;">
+                  <div class="toggle-wrapper">
+                    <div class="toggle active" id="email-nvr-time-drift-toggle"></div>
+                    <span class="toggle-label">Notify when NVR time is incorrect (Time Warning)</span>
+                    <input type="checkbox" id="email-nvr-time-drift" checked hidden />
+                  </div>
+                </div>
+                <div class="form-group" style="margin-bottom: 12px;">
+                  <div class="toggle-wrapper">
+                    <div class="toggle active" id="email-channel-not-recording-toggle"></div>
+                    <span class="toggle-label">Notify when camera not recording on motion (Camera Not Recording)</span>
+                    <input type="checkbox" id="email-channel-not-recording" checked hidden />
+                  </div>
+                </div>
+                <div class="form-group" style="margin-bottom: 0;">
+                  <div class="toggle-wrapper">
+                    <div class="toggle active" id="email-recording-mismatch-toggle"></div>
+                    <span class="toggle-label">Notify when camera count mismatch (Camera Count Mismatch)</span>
+                    <input type="checkbox" id="email-recording-mismatch" checked hidden />
+                  </div>
+                </div>
+              </div>
             </div>
             <div class="form-group">
               <label>Alert Recipients</label>
@@ -556,7 +580,7 @@
             </div>
             <div class="form-group">
               <label>Alert Email Interval (minutes)</label>
-              <input type="number" id="alert-email-interval" min="1" max="1440" placeholder="30" />
+              <input type="number" id="alert-email-interval" min="1" max="1440" placeholder="10" />
               <div class="help-text">How often unacknowledged active alerts can send repeated emails (minimum 1 minute)</div>
             </div>
             <div class="form-actions">
@@ -653,8 +677,8 @@
           <p style="margin: 0 0 16px 0; color: var(--text-muted); font-size: 14px;">
             Synchronize the time on all connected NVRs to match your local PC time.
           </p>
-          <div class="form-actions" style="border: none; padding: 0; margin: 0;">
-            <button class="btn btn-success" id="sync-all-time">
+          <div style="margin-bottom: 20px;">
+            <button class="btn btn-success" id="sync-all-time" style="width: 100%;">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="10"></circle>
                 <polyline points="12 6 12 12 16 14"></polyline>
@@ -662,6 +686,25 @@
               Sync All NVRs to Local Time
             </button>
           </div>
+
+          <hr style="border: none; border-top: 1px solid var(--border-color); margin: 20px 0;" />
+
+          <form id="time-tolerance-form">
+            <div class="form-group">
+              <label for="time-tolerance">Time Drift Threshold (seconds)</label>
+              <input type="number" id="time-tolerance" min="30" placeholder="120" required />
+              <div class="help-text">Define the drift allowed (minimum 30 seconds) before raising alert status and marking time red on dashboard</div>
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary" id="time-tolerance-save-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                  <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                </svg>
+                Save Threshold
+              </button>
+            </div>
+          </form>
         </div>
 
         <!-- System Diagnostics -->
@@ -757,8 +800,25 @@
         };
       }
 
+      function updateSubOptionsVisibility(enabled) {
+        const subOptions = document.getElementById('email-sub-options');
+        if (enabled) {
+          subOptions.style.opacity = '1';
+          subOptions.style.pointerEvents = 'auto';
+        } else {
+          subOptions.style.opacity = '0.5';
+          subOptions.style.pointerEvents = 'none';
+        }
+      }
+
       const tlsToggle = initToggle('smtp-tls-toggle', 'smtp-tls');
-      const emailEnabledToggle = initToggle('email-enabled-toggle', 'email-enabled');
+      const emailEnabledToggle = initToggle('email-enabled-toggle', 'email-enabled', (checked) => {
+        updateSubOptionsVisibility(checked);
+      });
+      const emailNvrOfflineToggle = initToggle('email-nvr-offline-toggle', 'email-nvr-offline');
+      const emailNvrTimeDriftToggle = initToggle('email-nvr-time-drift-toggle', 'email-nvr-time-drift');
+      const emailChannelNotRecordingToggle = initToggle('email-channel-not-recording-toggle', 'email-channel-not-recording');
+      const emailRecordingMismatchToggle = initToggle('email-recording-mismatch-toggle', 'email-recording-mismatch');
       const bulkConfirmToggle = initToggle('bulk-confirm-toggle', 'bulk-confirm', (checked) => {
         document.getElementById('bulk-pass-btn').disabled = !checked;
       });
@@ -947,7 +1007,7 @@
           document.getElementById('smtp-username').value = s.smtp_username ?? '';
           document.getElementById('smtp-password').value = s.smtp_password ?? '';
           document.getElementById('smtp-from').value = s.smtp_from ?? '';
-          const intervalSeconds = Number(s.alert_email_interval_seconds ?? 1800);
+          const intervalSeconds = Number(s.alert_email_interval_seconds ?? 600);
           const intervalMinutes = Math.max(1, Math.round(intervalSeconds / 60));
           document.getElementById('alert-email-interval').value = intervalMinutes;
           const recipients = Array.isArray(s.smtp_to) ? s.smtp_to : parseRecipients(s.smtp_to);
@@ -955,6 +1015,15 @@
           renderSavedRecipients(recipients);
           tlsToggle.set(Boolean(s.smtp_tls));
           emailEnabledToggle.set(s.email_enabled !== false);
+          updateSubOptionsVisibility(s.email_enabled !== false);
+          emailNvrOfflineToggle.set(s.email_nvr_offline !== false);
+          emailNvrTimeDriftToggle.set(s.email_nvr_time_drift !== false);
+          emailChannelNotRecordingToggle.set(s.email_channel_not_recording !== false);
+          emailRecordingMismatchToggle.set(s.email_recording_mismatch !== false);
+
+          // Time tolerance
+          document.getElementById('time-tolerance').value = s.time_tolerance ?? 120;
+
           await checkSmtpStatus(false);
         } catch (e) {
           showToast('Failed to load settings', 'error');
@@ -1011,9 +1080,13 @@
           smtp_password: document.getElementById('smtp-password').value || null,
           smtp_tls: tlsToggle.get(),
           email_enabled: emailEnabledToggle.get(),
+          email_nvr_offline: emailNvrOfflineToggle.get(),
+          email_nvr_time_drift: emailNvrTimeDriftToggle.get(),
+          email_channel_not_recording: emailChannelNotRecordingToggle.get(),
+          email_recording_mismatch: emailRecordingMismatchToggle.get(),
           smtp_from: document.getElementById('smtp-from').value.trim() || null,
           smtp_to: parseRecipients(document.getElementById('smtp-to').value),
-          alert_email_interval_seconds: Math.max(1, Number(document.getElementById('alert-email-interval').value) || 30) * 60,
+          alert_email_interval_seconds: Math.max(1, Number(document.getElementById('alert-email-interval').value) || 10) * 60,
         };
         setLoading(btn, true);
         try {
@@ -1152,6 +1225,33 @@
             showToast('Time synchronized for all available NVRs');
           } else {
             showToast('Sync failed: ' + (data.message || 'Unknown error'), 'error');
+          }
+        } catch (err) {
+          showToast('Request failed', 'error');
+        } finally {
+          setLoading(btn, false);
+        }
+      });
+
+      // Time Tolerance form submit
+      document.getElementById('time-tolerance-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btn = document.getElementById('time-tolerance-save-btn');
+        const tolerance = Number(document.getElementById('time-tolerance').value);
+        if (!Number.isFinite(tolerance) || tolerance < 30) {
+          return showToast('Invalid tolerance value. Must be at least 30 seconds.', 'error');
+        }
+        setLoading(btn, true);
+        try {
+          const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ time_tolerance: tolerance })
+          });
+          if (res.ok) {
+            showToast('Time drift threshold saved successfully');
+          } else {
+            showToast('Failed to save threshold', 'error');
           }
         } catch (err) {
           showToast('Request failed', 'error');

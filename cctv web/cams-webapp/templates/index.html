@@ -7,22 +7,46 @@
   <meta name="description" content="Cams WebApp — Real-time CCTV NVR monitoring dashboard" />
   <title>Cams WebApp — Dashboard</title>
   <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/header.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📹</text></svg>" />
 </head>
 
-<body>
+<body class="page-dashboard">
   <header>
-    <h1>Cams Dashboard</h1>
-    <div class="actions">
-      <button id="btn-add-nvr">+ Add NVR</button>
-      <button id="refresh">↻ Refresh</button>
-      <a class="link-settings" href="/settings">⚙ Settings</a>
-      <a class="link-logs" href="/logs">🧾 Logs</a>
-      <a class="link-calendar" href="/calendar">📅 Calendar</a>
-      <small id="last-updated">Last updated: —</small>
-      <div id="live-indicator" class="live-indicator" title="Connected to live updates">
-        <span class="live-dot"></span>
-        <span class="live-text">Live</span>
+    <div class="nav-container">
+      <div class="nav-left">
+        <a href="/" class="brand">
+          <span class="brand-icon">📹</span>
+          <h1 class="brand-name" style="margin: 0; display: inline-block;">Cams Control</h1>
+        </a>
+        <nav class="nav-links">
+          <a id="nav-dashboard" class="nav-link" href="/">🖥 Dashboard</a>
+          <a id="nav-calendar" class="nav-link" href="/calendar">📅 Calendar</a>
+          <a id="nav-logs" class="nav-link" href="/logs">🧾 Logs</a>
+          <a id="nav-settings" class="nav-link" href="/settings">⚙ Settings</a>
+        </nav>
+      </div>
+      
+      <div class="nav-right">
+        <!-- Dashboard actions (visible on body.page-dashboard) -->
+        <div id="dashboard-actions" class="header-actions">
+          <button id="btn-add-nvr">+ Add NVR</button>
+          <button id="refresh">↻ Refresh</button>
+          <small id="last-updated">Last updated: —</small>
+          <div id="live-indicator" class="live-indicator" title="Connected to live updates">
+            <span class="live-dot"></span>
+            <span class="live-text">Live</span>
+          </div>
+        </div>
+
+        <!-- Logs actions (visible on body.page-logs) -->
+        <div id="logs-actions" class="header-actions">
+          <small>Updated: <span id="last-refresh-time">--:--:--</span></small>
+          <div id="logs-live-indicator" class="live-indicator" title="Live status">
+            <span class="live-dot"></span>
+            <span id="live-status" class="live-text">Live</span>
+          </div>
+        </div>
       </div>
     </div>
   </header>
@@ -160,6 +184,7 @@
     let searchQuery = '';
     let activeStatusFilter = null; // 'Online', 'Offline', 'Warning', or null
     let eventSource = null;
+    let timeToleranceSec = 120;
 
     const WEEK_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -335,7 +360,7 @@
     function isNvrTimeShifted(value) {
       const parsedMs = parseNvrTimeForSort(value);
       if (parsedMs === null) return false;
-      return Math.abs(Date.now() - parsedMs) > (2 * 60 * 1000);
+      return Math.abs(Date.now() - parsedMs) > (timeToleranceSec * 1000);
     }
 
     function renderNvrTimeCell(value) {
@@ -343,7 +368,9 @@
       if (!raw.trim()) return '—';
       const safeValue = escapeHtml(raw);
       if (!isNvrTimeShifted(raw)) return safeValue;
-      return `<span class="nvr-time-shifted" title="NVR time differs by more than 2 minutes">${safeValue}</span>`;
+      const driftMinutes = Math.round(timeToleranceSec / 60);
+      const toleranceLabel = driftMinutes >= 1 ? `${driftMinutes} minute(s)` : `${timeToleranceSec} seconds`;
+      return `<span class="nvr-time-shifted" title="NVR time differs by more than ${toleranceLabel}">${safeValue}</span>`;
     }
 
     function updateStats(nvrs) {
@@ -530,7 +557,7 @@
       
       const liveIndicator = document.getElementById('live-indicator');
       
-      eventSource = new EventSource('/api/events');
+      eventSource = new EventSource('/api/events/stream');
       
       eventSource.onopen = () => {
         liveIndicator.classList.add('connected');
@@ -574,7 +601,11 @@
         const res = await fetch('/api/settings');
         const s = await res.json();
         const ri = Number(s.refresh_interval ?? 60);
+        timeToleranceSec = Number(s.time_tolerance ?? 120);
         startAutoRefresh(Math.max(1, ri));
+        if (lastNvrs && lastNvrs.length > 0) {
+          renderTable(lastNvrs);
+        }
       } catch (e) {
         startAutoRefresh(60);
       }
@@ -655,7 +686,7 @@
       document.getElementById('nvr-modal-overlay').hidden = true;
       setupSorting();
       connectSSE();
-      // await forceServerRefreshAndReload(); // SSE will pick up initial state
+      loadRefreshIntervalAndStart();
     });
 
     // If tab gains focus, re-read settings to pick up interval changes

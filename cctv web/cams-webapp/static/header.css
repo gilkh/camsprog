@@ -1,0 +1,262 @@
+/* header.css - Unified Header Styles */
+
+:root {
+  --hdr-bg: rgba(10, 14, 26, 0.95);
+  --hdr-border: rgba(255, 255, 255, 0.08);
+  --hdr-text: #f1f5f9;
+  --hdr-text-muted: #94a3b8;
+  --hdr-text-dim: #64748b;
+  --hdr-hover: rgba(255, 255, 255, 0.08);
+  --hdr-active-bg: rgba(99, 102, 241, 0.15);
+  --hdr-active-border: rgba(99, 102, 241, 0.4);
+  --hdr-accent: #6366f1;
+  --hdr-green: #22c55e;
+  --hdr-green-glow: rgba(34, 197, 94, 0.25);
+  --hdr-red: #ef4444;
+  --hdr-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+/* Base Header Layout */
+header {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  background: var(--hdr-bg) !important;
+  backdrop-filter: blur(20px) saturate(1.4) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(1.4) !important;
+  border-bottom: 1px solid var(--hdr-border) !important;
+  padding: 0 24px !important;
+  height: 64px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  box-shadow: var(--hdr-shadow) !important;
+  box-sizing: border-box !important;
+  color: var(--hdr-text) !important;
+}
+
+/* Inner Container for alignment */
+.nav-container {
+  width: 100%;
+  max-width: 1400px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.nav-left {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+}
+
+/* Brand Logo */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none !important;
+  color: var(--hdr-text) !important;
+  transition: opacity 0.2s;
+}
+
+.brand:hover {
+  opacity: 0.9;
+}
+
+.brand-icon {
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.brand-name {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #f1f5f9 0%, #94a3b8 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Navigation Links */
+.nav-links {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.nav-link {
+  text-decoration: none !important;
+  color: var(--hdr-text-muted) !important;
+  padding: 8px 16px !important;
+  border-radius: 8px !important;
+  font-size: 0.875rem !important;
+  font-weight: 500 !important;
+  border: 1px solid transparent !important;
+  transition: all 0.2s ease !important;
+  line-height: 1.2 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+}
+
+.nav-link:hover {
+  color: var(--hdr-text) !important;
+  background: var(--hdr-hover) !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* Active Nav Links styling via body classes */
+body.page-dashboard #nav-dashboard,
+body.page-calendar #nav-calendar,
+body.page-logs #nav-logs,
+body.page-settings #nav-settings {
+  color: var(--hdr-text) !important;
+  background: var(--hdr-active-bg) !important;
+  border-color: var(--hdr-active-border) !important;
+  font-weight: 600 !important;
+}
+
+/* Right side actions and indicators */
+.nav-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+/* Action Groups */
+.header-actions {
+  display: none;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Conditional visibility based on body class */
+body.page-dashboard #dashboard-actions {
+  display: flex !important;
+}
+
+body.page-logs #logs-actions {
+  display: flex !important;
+}
+
+/* Dashboard Action Buttons & Indicators */
+.header-actions button {
+  background: rgba(255, 255, 255, 0.04) !important;
+  color: var(--hdr-text-muted) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  padding: 8px 16px !important;
+  border-radius: 8px !important;
+  cursor: pointer !important;
+  font-family: inherit !important;
+  font-size: 0.857rem !important;
+  font-weight: 500 !important;
+  transition: all 0.15s ease !important;
+  line-height: 1.2 !important;
+}
+
+.header-actions button:hover {
+  background: var(--hdr-hover) !important;
+  color: var(--hdr-text) !important;
+  border-color: rgba(255, 255, 255, 0.18) !important;
+}
+
+.header-actions button#btn-add-nvr {
+  background: linear-gradient(135deg, var(--hdr-accent) 0%, #7c3aed 100%) !important;
+  color: white !important;
+  border: none !important;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.25) !important;
+  font-weight: 600 !important;
+}
+
+.header-actions button#btn-add-nvr:hover {
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4) !important;
+  transform: translateY(-1px) !important;
+}
+
+.header-actions button#btn-add-nvr:active {
+  transform: translateY(0) !important;
+}
+
+.header-actions small {
+  color: var(--hdr-text-dim) !important;
+  font-size: 0.786rem !important;
+  font-family: inherit !important;
+}
+
+/* Live Indicator Styling */
+.live-indicator {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  background: rgba(255, 255, 255, 0.03) !important;
+  padding: 4px 10px !important;
+  border-radius: 100px !important;
+  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  opacity: 0.5 !important;
+  transition: all 0.25s ease !important;
+}
+
+.live-indicator.connected {
+  opacity: 1 !important;
+  border-color: rgba(34, 197, 94, 0.12) !important;
+  background: rgba(34, 197, 94, 0.12) !important;
+}
+
+.live-dot {
+  width: 6px !important;
+  height: 6px !important;
+  border-radius: 50% !important;
+  background: var(--hdr-text-dim) !important;
+  transition: all 0.25s ease !important;
+  display: inline-block !important;
+}
+
+.live-indicator.connected .live-dot {
+  background: var(--hdr-green) !important;
+  box-shadow: 0 0 8px var(--hdr-green-glow) !important;
+  animation: pulse-green-dot 2s ease-in-out infinite !important;
+}
+
+.live-text {
+  font-size: 0.714rem !important;
+  font-weight: 700 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.05em !important;
+  color: var(--hdr-text-dim) !important;
+}
+
+.live-indicator.connected .live-text {
+  color: var(--hdr-green) !important;
+}
+
+@keyframes pulse-green-dot {
+  0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--hdr-green-glow); }
+  50% { opacity: 0.6; box-shadow: 0 0 16px var(--hdr-green-glow); }
+}
+
+/* Responsiveness */
+@media (max-width: 768px) {
+  header {
+    height: auto !important;
+    padding: 12px 16px !important;
+  }
+  .nav-container {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .nav-left {
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .nav-right {
+    justify-content: flex-end;
+  }
+  .header-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+}

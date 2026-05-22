@@ -7,6 +7,7 @@
   <meta name="description" content="NVR Uptime & Downtime heatmap calendar — Cams WebApp" />
   <title>Uptime Calendar — Cams WebApp</title>
   <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/header.css" />
   <link rel="icon"
     href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📹</text></svg>" />
   <style>
@@ -600,12 +601,43 @@
   </style>
 </head>
 
-<body>
+<body class="page-calendar">
   <header>
-    <h1>Cams Dashboard</h1>
-    <div class="actions">
-      <a href="/">◧ Dashboard</a>
-      <a href="/settings">⚙ Settings</a>
+    <div class="nav-container">
+      <div class="nav-left">
+        <a href="/" class="brand">
+          <span class="brand-icon">📹</span>
+          <h1 class="brand-name" style="margin: 0; display: inline-block;">Cams Control</h1>
+        </a>
+        <nav class="nav-links">
+          <a id="nav-dashboard" class="nav-link" href="/">🖥 Dashboard</a>
+          <a id="nav-calendar" class="nav-link" href="/calendar">📅 Calendar</a>
+          <a id="nav-logs" class="nav-link" href="/logs">🧾 Logs</a>
+          <a id="nav-settings" class="nav-link" href="/settings">⚙ Settings</a>
+        </nav>
+      </div>
+      
+      <div class="nav-right">
+        <!-- Dashboard actions (visible on body.page-dashboard) -->
+        <div id="dashboard-actions" class="header-actions">
+          <button id="btn-add-nvr">+ Add NVR</button>
+          <button id="refresh">↻ Refresh</button>
+          <small id="last-updated">Last updated: —</small>
+          <div id="live-indicator" class="live-indicator" title="Connected to live updates">
+            <span class="live-dot"></span>
+            <span class="live-text">Live</span>
+          </div>
+        </div>
+
+        <!-- Logs actions (visible on body.page-logs) -->
+        <div id="logs-actions" class="header-actions">
+          <small>Updated: <span id="last-refresh-time">--:--:--</span></small>
+          <div id="logs-live-indicator" class="live-indicator" title="Live status">
+            <span class="live-dot"></span>
+            <span id="live-status" class="live-text">Live</span>
+          </div>
+        </div>
+      </div>
     </div>
   </header>
 

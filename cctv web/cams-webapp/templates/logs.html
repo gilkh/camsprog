@@ -7,6 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/header.css" />
     <style>
       :root {
         --bg: #0a0a0f;
@@ -43,104 +44,7 @@
           radial-gradient(ellipse at 20% 0%, rgba(55, 66, 250, 0.08) 0%, transparent 50%),
           radial-gradient(ellipse at 80% 100%, rgba(255, 71, 87, 0.05) 0%, transparent 50%);
       }
-      header {
-        background: rgba(24, 24, 31, 0.8);
-        backdrop-filter: blur(20px);
-        border-bottom: 1px solid var(--border);
-        padding: 16px 24px;
-        position: sticky;
-        top: 0;
-        z-index: 100;
-      }
-      .header-content {
-        max-width: 1400px;
-        margin: 0 auto;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 20px;
-      }
-      .header-left {
-        display: flex;
-        align-items: center;
-        gap: 20px;
-      }
-      .logo {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-      }
-      .logo-icon {
-        width: 36px;
-        height: 36px;
-        background: linear-gradient(135deg, #3742fa, #ff4757);
-        border-radius: var(--radius-sm);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 18px;
-      }
-      h1 {
-        font-size: 20px;
-        font-weight: 700;
-        letter-spacing: -0.5px;
-      }
-      .header-meta {
-        display: flex;
-        align-items: center;
-        gap: 16px;
-        padding-left: 20px;
-        border-left: 1px solid var(--border);
-      }
-      .live-indicator {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-size: 12px;
-        color: var(--text-muted);
-      }
-      .live-dot {
-        width: 8px;
-        height: 8px;
-        background: var(--ok);
-        border-radius: 50%;
-        animation: pulse 2s infinite;
-      }
-      @keyframes pulse {
-        0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(46, 213, 115, 0.4); }
-        50% { opacity: 0.7; box-shadow: 0 0 0 6px rgba(46, 213, 115, 0); }
-      }
-      .last-updated {
-        font-size: 12px;
-        color: var(--text-dim);
-      }
-      .last-updated span {
-        color: var(--text-muted);
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 11px;
-      }
-      nav {
-        display: flex;
-        gap: 4px;
-      }
-      .nav-link {
-        text-decoration: none;
-        color: var(--text-dim);
-        padding: 8px 14px;
-        border-radius: var(--radius-sm);
-        font-size: 13px;
-        font-weight: 500;
-        transition: all 0.2s;
-      }
-      .nav-link:hover {
-        color: var(--text);
-        background: var(--surface-elevated);
-      }
-      .nav-link.active {
-        color: var(--text);
-        background: var(--surface-elevated);
-        border: 1px solid var(--border);
-      }
+      /* Unified header rules are in header.css */
       main {
         max-width: 1400px;
         margin: 0 auto;
@@ -760,8 +664,7 @@
         .search-container { max-width: none; }
         .toolbar-actions { justify-content: stretch; }
         .toolbar-actions .btn { flex: 1; justify-content: center; }
-        .header-content { flex-direction: column; gap: 12px; }
-        .header-meta { border-left: none; padding-left: 0; }
+        /* header classes handled by header.css */
         .alert-header { flex-direction: column; gap: 10px; }
         .alert-timing { flex-wrap: wrap; }
         .data-table { font-size: 11px; }
@@ -771,29 +674,43 @@
       .mono { font-family: 'JetBrains Mono', monospace; }
     </style>
   </head>
-  <body>
+  <body class="page-logs">
     <header>
-      <div class="header-content">
-        <div class="header-left">
-          <div class="logo">
-            <div class="logo-icon">📡</div>
-            <h1>Alert Logs</h1>
-          </div>
-          <div class="header-meta">
-            <div class="live-indicator">
+      <div class="nav-container">
+        <div class="nav-left">
+          <a href="/" class="brand">
+            <span class="brand-icon">📹</span>
+            <h1 class="brand-name" style="margin: 0; display: inline-block;">Cams Control</h1>
+          </a>
+          <nav class="nav-links">
+            <a id="nav-dashboard" class="nav-link" href="/">🖥 Dashboard</a>
+            <a id="nav-calendar" class="nav-link" href="/calendar">📅 Calendar</a>
+            <a id="nav-logs" class="nav-link" href="/logs">🧾 Logs</a>
+            <a id="nav-settings" class="nav-link" href="/settings">⚙ Settings</a>
+          </nav>
+        </div>
+        
+        <div class="nav-right">
+          <!-- Dashboard actions (visible on body.page-dashboard) -->
+          <div id="dashboard-actions" class="header-actions">
+            <button id="btn-add-nvr">+ Add NVR</button>
+            <button id="refresh">↻ Refresh</button>
+            <small id="last-updated">Last updated: —</small>
+            <div id="live-indicator" class="live-indicator" title="Connected to live updates">
               <span class="live-dot"></span>
-              <span id="live-status">Live</span>
+              <span class="live-text">Live</span>
             </div>
-            <div class="last-updated">
-              Updated: <span id="last-refresh-time">--:--:--</span>
+          </div>
+
+          <!-- Logs actions (visible on body.page-logs) -->
+          <div id="logs-actions" class="header-actions">
+            <small>Updated: <span id="last-refresh-time">--:--:--</span></small>
+            <div id="logs-live-indicator" class="live-indicator connected" title="Live status">
+              <span class="live-dot"></span>
+              <span id="live-status" class="live-text">Live</span>
             </div>
           </div>
         </div>
-        <nav>
-          <a class="nav-link" href="/">◧ Dashboard</a>
-          <a class="nav-link active" href="/logs">📋 Logs</a>
-          <a class="nav-link" href="/settings">⚙ Settings</a>
-        </nav>
       </div>
     </header>
 
@@ -943,6 +860,7 @@
       const els = {
         liveStatus: document.getElementById('live-status'),
         lastRefreshTime: document.getElementById('last-refresh-time'),
+        logsLiveIndicator: document.getElementById('logs-live-indicator'),
         countTotal: document.getElementById('count-total'),
         countCritical: document.getElementById('count-critical'),
         countWarning: document.getElementById('count-warning'),
@@ -1375,9 +1293,11 @@
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
           els.liveStatus.textContent = 'Paused';
+          els.logsLiveIndicator?.classList.remove('connected');
           if (autoTimer) clearInterval(autoTimer);
         } else {
           els.liveStatus.textContent = 'Live';
+          els.logsLiveIndicator?.classList.add('connected');
           loadLogs(false);
           scheduleAutoRefresh();
         }

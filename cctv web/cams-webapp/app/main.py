@@ -1016,6 +1016,13 @@ def _build_current_alerts(snapshot: list, settings: dict) -> dict:
     now_ts = int(time.time())
     tolerance_sec = _parse_int(settings.get("time_tolerance"))
     if tolerance_sec is None or tolerance_sec < 30:
+        # Fall back to config file directly in case merged settings missed it
+        try:
+            file_s = _load_settings_from_file()
+            tolerance_sec = _parse_int(file_s.get("time_tolerance"))
+        except Exception:
+            tolerance_sec = None
+    if tolerance_sec is None or tolerance_sec < 30:
         tolerance_sec = 120
 
     out = {}
@@ -1057,8 +1064,8 @@ def _build_current_alerts(snapshot: list, settings: dict) -> dict:
         nvr_time_epoch = _parse_nvr_time_epoch(nvr.get("nvr_time"))
         if nvr_time_epoch is not None:
             drift = abs(now_ts - nvr_time_epoch)
-            # Only alert if drift is more than 5 minutes (300 seconds)
-            if drift > 300:
+            # Only alert if drift is more than the time tolerance threshold
+            if drift > tolerance_sec:
                 drift_min = int(round(drift / 60.0))
                 alert_id = f"nvr_time_drift:{ip}"
                 out[alert_id] = {
@@ -1268,7 +1275,7 @@ def _process_alert_cycle_once():
 
         interval = _parse_int(settings.get("alert_email_interval_seconds"))
         if interval is None or interval < 30:
-            interval = 1800
+            interval = 600
         due_before = now_ts - interval
 
         due_alerts = list(
@@ -1296,7 +1303,44 @@ def _process_alert_cycle_once():
         if not due_alerts:
             return
 
-        subject, text_body, html_body = _build_alert_email_content(due_alerts, now_ts)
+        email_enabled = settings.get("email_enabled") != False
+        email_nvr_offline = settings.get("email_nvr_offline") != False
+        email_nvr_time_drift = settings.get("email_nvr_time_drift") != False
+        email_recording_mismatch = settings.get("email_recording_mismatch") != False
+        email_channel_not_recording = settings.get("email_channel_not_recording") != False
+
+        to_send = []
+        to_skip = []
+
+        for alert in due_alerts:
+            t = alert.get("alert_type")
+            is_enabled = email_enabled
+            if is_enabled:
+                if t == "nvr_offline":
+                    is_enabled = email_nvr_offline
+                elif t == "nvr_time_drift":
+                    is_enabled = email_nvr_time_drift
+                elif t == "recording_expected_mismatch":
+                    is_enabled = email_recording_mismatch
+                elif t == "channel_not_recording":
+                    is_enabled = email_channel_not_recording
+            
+            if is_enabled:
+                to_send.append(alert)
+            else:
+                to_skip.append(alert)
+
+        if to_skip:
+            skip_ids = [x.get("_id") for x in to_skip if x.get("_id")]
+            alerts_col.update_many(
+                {"_id": {"$in": skip_ids}},
+                {"$set": {"last_emailed_at": now_ts, "last_email_status": "skipped"}},
+            )
+
+        if not to_send:
+            return
+
+        subject, text_body, html_body = _build_alert_email_content(to_send, now_ts)
 
         ok, err, smtp_used = _send_alert_email(
             settings,
@@ -1305,9 +1349,9 @@ def _process_alert_cycle_once():
             text_body,
             html_body=html_body,
         )
-        alert_ids = [x.get("_id") for x in due_alerts if x.get("_id")]
+        send_ids = [x.get("_id") for x in to_send if x.get("_id")]
         alerts_col.update_many(
-            {"_id": {"$in": alert_ids}},
+            {"_id": {"$in": send_ids}},
             {"$set": {"last_emailed_at": now_ts, "last_email_status": "success" if ok else "failed"}},
         )
         email_col.insert_one(
@@ -1315,8 +1359,8 @@ def _process_alert_cycle_once():
                 "created_at": now_ts,
                 "subject": subject,
                 "to": recipients,
-                "alert_ids": alert_ids,
-                "count": len(alert_ids),
+                "alert_ids": send_ids,
+                "count": len(send_ids),
                 "success": bool(ok),
                 "error": err,
                 "smtp_used": smtp_used,
@@ -1413,7 +1457,7 @@ def api_nvrs():
     return JSONResponse(monitor.get_snapshot())
 
 
-@app.get("/api/events")
+@app.get("/api/events/stream")
 async def api_events(request: Request):
     """
     Server-Sent Events endpoint that streams NVR data whenever it updates.
@@ -1922,27 +1966,72 @@ def api_copy_expected_from_cameras(ip: str):
         return JSONResponse({"status": "error", "message": "Failed to copy expected"}, status_code=500)
 @app.get("/api/settings")
 def api_get_settings():
+    # Build response field-by-field so a bad value in one field never blocks the others.
+    out: dict = {}
     try:
         s = _get_merged_settings()
-        # include current runtime interval
-        s["refresh_interval"] = int(s.get("refresh_interval") or monitor.poll_interval or 60)
-        s["smtp_to"] = _normalize_smtp_to(s.get("smtp_to"))
-        s["alert_email_interval_seconds"] = int(s.get("alert_email_interval_seconds") or 1800)
-        return JSONResponse(s)
     except Exception:
-        return JSONResponse({
-            "refresh_interval": monitor.poll_interval,
-            "smtp_host": None,
-            "smtp_port": None,
-            "smtp_host_2": None,
-            "smtp_port_2": None,
-            "smtp_username": None,
-            "smtp_password": None,
-            "smtp_tls": False,
-            "smtp_from": None,
-            "smtp_to": [],
-            "alert_email_interval_seconds": 1800,
-        })
+        s = {}
+
+    # Refresh interval
+    try:
+        out["refresh_interval"] = int(s.get("refresh_interval") or monitor.poll_interval or 60)
+    except Exception:
+        out["refresh_interval"] = int(monitor.poll_interval or 60)
+
+    # SMTP fields
+    for key in ("smtp_host", "smtp_host_2", "smtp_username", "smtp_password", "smtp_from"):
+        try:
+            out[key] = s.get(key)
+        except Exception:
+            out[key] = None
+    for key in ("smtp_port", "smtp_port_2"):
+        try:
+            val = s.get(key)
+            out[key] = int(val) if val is not None else None
+        except Exception:
+            out[key] = None
+    try:
+        out["smtp_tls"] = bool(s.get("smtp_tls") or False)
+    except Exception:
+        out["smtp_tls"] = False
+    try:
+        out["smtp_to"] = _normalize_smtp_to(s.get("smtp_to"))
+    except Exception:
+        out["smtp_to"] = []
+
+    # Alert email interval
+    try:
+        out["alert_email_interval_seconds"] = int(s.get("alert_email_interval_seconds") or 600)
+    except Exception:
+        out["alert_email_interval_seconds"] = 600
+
+    # Time drift threshold — read from merged settings (file + DB); fall back to file directly.
+    try:
+        raw_tol = s.get("time_tolerance")
+        if raw_tol is None:
+            # Not in merged (DB+file) — try file alone as last resort
+            file_s = _load_settings_from_file()
+            raw_tol = file_s.get("time_tolerance")
+        tol = int(raw_tol) if raw_tol is not None else 120
+        out["time_tolerance"] = max(30, tol)
+    except Exception:
+        out["time_tolerance"] = 120
+
+    # Email notification toggles
+    for key, default in (
+        ("email_enabled", True),
+        ("email_nvr_offline", True),
+        ("email_nvr_time_drift", True),
+        ("email_recording_mismatch", True),
+        ("email_channel_not_recording", True),
+    ):
+        try:
+            out[key] = bool(s[key] if key in s else default)
+        except Exception:
+            out[key] = default
+
+    return JSONResponse(out)
 
 
 @app.post("/api/settings")
@@ -1975,11 +2064,26 @@ def api_set_settings(payload: dict):
                 update["smtp_port_2"] = None
         if "smtp_tls" in payload:
             update["smtp_tls"] = bool(payload.get("smtp_tls"))
+        for key in ("email_enabled", "email_nvr_offline", "email_nvr_time_drift", "email_recording_mismatch", "email_channel_not_recording"):
+            if key in payload:
+                update[key] = bool(payload.get(key))
         if "alert_email_interval_seconds" in payload:
             try:
                 v = int(payload.get("alert_email_interval_seconds"))
                 if v >= 60:
                     update["alert_email_interval_seconds"] = v
+            except Exception:
+                pass
+        if "time_tolerance" in payload:
+            try:
+                v = int(payload.get("time_tolerance"))
+                if v >= 30:
+                    update["time_tolerance"] = v
+                    # Mirror to monitor so it takes effect immediately without restart.
+                    try:
+                        monitor.time_tolerance = v
+                    except Exception:
+                        pass
             except Exception:
                 pass
         if update:
