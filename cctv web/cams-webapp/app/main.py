@@ -256,6 +256,7 @@ def _friendly_alert_type(alert_type: str | None) -> str:
                 "recording_expected_mismatch": "Recording Count Mismatch",
                 "nvr_time_drift": "NVR Time Drift",
                 "channel_not_recording": "Channel Not Recording",
+                "channel_not_motion_recording": "Channel Not Motion Recording",
         }
         key = (alert_type or "").strip()
         return mapping.get(key, key.replace("_", " ").title() or "Alert")
@@ -754,7 +755,13 @@ def _severity_order(severity: str | None) -> int:
         return 3
 
 
-def _build_alert_email_content(due_alerts: list[dict], generated_at_ts: int) -> tuple[str, str, str]:
+def _build_alert_email_content(
+    due_alerts: list[dict],
+    generated_at_ts: int,
+    summary_title: str = "Active Alert Summary",
+    subject_prefix: str = "Cams Alerts",
+    acknowledged: bool = False,
+) -> tuple[str, str, str]:
         total = len(due_alerts)
         critical_count = sum(1 for a in due_alerts if (a.get("severity") or "").lower() == "critical")
         warning_count = sum(1 for a in due_alerts if (a.get("severity") or "").lower() == "warning")
@@ -770,10 +777,11 @@ def _build_alert_email_content(due_alerts: list[dict], generated_at_ts: int) -> 
                 ),
         )
 
-        subject = f"Cams Alerts: {total} active"
+        subject = f"{subject_prefix}: {total} active"
+        ack_note = " These alerts were acknowledged but are still active." if acknowledged else ""
 
         text_lines = [
-                f"Cams WebApp Alert Summary ({_format_local_datetime(generated_at_ts)})",
+                f"Cams WebApp {summary_title} ({_format_local_datetime(generated_at_ts)})",
                 "",
                 f"Total active alerts in this email: {total}",
                 f"Critical: {critical_count}",
@@ -781,7 +789,7 @@ def _build_alert_email_content(due_alerts: list[dict], generated_at_ts: int) -> 
                 f"Non-critical: {non_critical_count}",
                 "",
                 "Situation overview:",
-                "The monitoring system detected active conditions that may affect camera health, recording continuity, or time accuracy.",
+                "The monitoring system detected active conditions that may affect camera health, recording continuity, or time accuracy." + ack_note,
                 "Please review the incidents below and acknowledge them in the Logs page after verification.",
                 "",
                 "Active incidents:",
@@ -863,14 +871,14 @@ def _build_alert_email_content(due_alerts: list[dict], generated_at_ts: int) -> 
                         <tr>
                             <td style=\"padding:24px 24px 18px;background:linear-gradient(120deg,#0f172a,#1d4ed8);color:#ffffff;\">
                                 <div style=\"font-size:12px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.9;\">Cams WebApp</div>
-                                <h1 style=\"margin:8px 0 0;font-size:24px;line-height:1.2;\">Active Alert Summary</h1>
+                                <h1 style=\"margin:8px 0 0;font-size:24px;line-height:1.2;\">{summary_title}</h1>
                                 <p style=\"margin:10px 0 0;font-size:14px;opacity:0.95;\">Generated at {generated_at}</p>
                             </td>
                         </tr>
                         <tr>
                             <td style=\"padding:20px 24px 8px;\">
                                 <p style=\"margin:0 0 14px;font-size:14px;line-height:1.6;color:#1e293b;\">
-                                    The monitoring system detected active conditions that may affect camera health, recording continuity, or time accuracy.
+                                    The monitoring system detected active conditions that may affect camera health, recording continuity, or time accuracy.{ack_note}
                                     Review the incident list below and acknowledge alerts after investigation.
                                 </p>
                             </td>
@@ -944,6 +952,8 @@ def _build_alert_email_content(due_alerts: list[dict], generated_at_ts: int) -> 
 </html>
         """.format(
                 subject=html.escape(subject),
+                summary_title=html.escape(summary_title),
+                ack_note=html.escape(ack_note),
                 generated_at=html.escape(_format_local_datetime(generated_at_ts)),
                 total=total,
                 critical_count=critical_count,
@@ -1028,6 +1038,44 @@ def _build_test_email_content(generated_at_ts: int, smtp_mode: str, recipient_co
         return subject, text_body, html_body
 
 
+def _alert_email_enabled_for_type(settings: dict, alert_type: str | None) -> bool:
+    if settings.get("email_enabled") == False:
+        return False
+    t = alert_type or ""
+    if t == "nvr_offline":
+        return settings.get("email_nvr_offline") != False
+    if t == "nvr_time_drift":
+        return settings.get("email_nvr_time_drift") != False
+    if t == "recording_expected_mismatch":
+        return settings.get("email_recording_mismatch") != False
+    if t in {"channel_not_recording", "channel_not_motion_recording"}:
+        return settings.get("email_channel_not_recording") != False
+    return True
+
+
+def _settings_interval(settings: dict, key: str, default_seconds: int, min_seconds: int = 60) -> int:
+    interval = _parse_int(settings.get(key))
+    if interval is None or interval < min_seconds:
+        return default_seconds
+    return interval
+
+
+def _alert_email_projection() -> dict:
+    return {
+        "_id": 1,
+        "severity": 1,
+        "nvr_name": 1,
+        "nvr_ip": 1,
+        "message": 1,
+        "alert_type": 1,
+        "channel": 1,
+        "acknowledged": 1,
+        "acknowledged_at": 1,
+        "last_emailed_at": 1,
+        "last_ack_reminder_emailed_at": 1,
+    }
+
+
 def _build_current_alerts(snapshot: list, settings: dict) -> dict:
     now_ts = int(time.time())
     tolerance_sec = _parse_int(settings.get("time_tolerance"))
@@ -1100,22 +1148,34 @@ def _build_current_alerts(snapshot: list, settings: dict) -> dict:
             for item in statuses:
                 if not isinstance(item, dict):
                     continue
-                if (item.get("status") or "") != "not-recording":
-                    continue
+                channel_status = (item.get("status") or "").strip()
                 ch = item.get("channel")
                 if ch is None:
                     continue
-                alert_id = f"channel_not_recording:{ip}:{ch}"
-                out[alert_id] = {
-                    "_id": alert_id,
-                    "alert_type": "channel_not_recording",
-                    "severity": "non-critical",
-                    "nvr_ip": ip,
-                    "nvr_name": name,
-                    "message": f"Channel {ch} is not recording",
-                    "channel": ch,
-                    "status": "active",
-                }
+                if channel_status == "not-recording":
+                    alert_id = f"channel_not_recording:{ip}:{ch}"
+                    out[alert_id] = {
+                        "_id": alert_id,
+                        "alert_type": "channel_not_recording",
+                        "severity": "non-critical",
+                        "nvr_ip": ip,
+                        "nvr_name": name,
+                        "message": f"Channel {ch} is not recording",
+                        "channel": ch,
+                        "status": "active",
+                    }
+                elif channel_status == "recording":
+                    alert_id = f"channel_not_motion_recording:{ip}:{ch}"
+                    out[alert_id] = {
+                        "_id": alert_id,
+                        "alert_type": "channel_not_motion_recording",
+                        "severity": "warning",
+                        "nvr_ip": ip,
+                        "nvr_name": name,
+                        "message": f"Channel {ch} is recording continuously instead of motion",
+                        "channel": ch,
+                        "status": "active",
+                    }
     return out
 
 
@@ -1240,6 +1300,7 @@ def _process_alert_cycle_once():
 
         current_ids = list(current_alerts.keys())
         existing_by_id = {}
+        newly_active_ids = []
         if current_ids:
             for doc in alerts_col.find({"_id": {"$in": current_ids}}, {"_id": 1, "status": 1}):
                 existing_by_id[doc.get("_id")] = doc
@@ -1257,6 +1318,7 @@ def _process_alert_cycle_once():
             }
             prev = existing_by_id.get(alert_id)
             if not prev:
+                newly_active_ids.append(alert_id)
                 base_set.update({
                     "first_seen": now_ts,
                     "acknowledged": False,
@@ -1265,6 +1327,7 @@ def _process_alert_cycle_once():
                     "resolved_at": None,
                 })
             elif prev.get("status") != "active":
+                newly_active_ids.append(alert_id)
                 base_set.update({
                     "first_seen": now_ts,
                     "acknowledged": False,
@@ -1289,75 +1352,154 @@ def _process_alert_cycle_once():
         if not recipients:
             return
 
-        interval = _parse_int(settings.get("alert_email_interval_seconds"))
-        if interval is None or interval < 30:
-            interval = 600
-        due_before = now_ts - interval
+        settings_col = db["settings"]
+        interval = _settings_interval(settings, "alert_email_interval_seconds", 600)
+        last_summary_at = _parse_int(settings.get("last_unack_alert_summary_emailed_at"))
+        unack_summary_due = last_summary_at is None or last_summary_at <= now_ts - interval
+        immediate_sent_ids = set()
 
-        due_alerts = list(
+        if newly_active_ids:
+            new_alerts = list(
+                alerts_col.find(
+                    {
+                        "_id": {"$in": newly_active_ids},
+                        "status": "active",
+                        "acknowledged": {"$ne": True},
+                    },
+                    _alert_email_projection(),
+                )
+            )
+            new_to_send = [a for a in new_alerts if _alert_email_enabled_for_type(settings, a.get("alert_type"))]
+            new_to_skip = [a for a in new_alerts if not _alert_email_enabled_for_type(settings, a.get("alert_type"))]
+
+            if new_to_skip:
+                skip_ids = [x.get("_id") for x in new_to_skip if x.get("_id")]
+                alerts_col.update_many(
+                    {"_id": {"$in": skip_ids}},
+                    {"$set": {"last_email_status": "skipped"}},
+                )
+
+            if new_to_send:
+                subject, text_body, html_body = _build_alert_email_content(
+                    new_to_send,
+                    now_ts,
+                    summary_title="New Alert Detected",
+                    subject_prefix="Cams New Alert",
+                )
+                ok, err, smtp_used = _send_alert_email(
+                    settings,
+                    recipients,
+                    subject,
+                    text_body,
+                    html_body=html_body,
+                )
+                immediate_send_ids = [x.get("_id") for x in new_to_send if x.get("_id")]
+                immediate_sent_ids.update(immediate_send_ids)
+                alerts_col.update_many(
+                    {"_id": {"$in": immediate_send_ids}},
+                    {"$set": {"last_emailed_at": now_ts, "last_email_status": "success" if ok else "failed"}},
+                )
+                email_col.insert_one(
+                    {
+                        "created_at": now_ts,
+                        "subject": subject,
+                        "to": recipients,
+                        "alert_ids": immediate_send_ids,
+                        "count": len(immediate_send_ids),
+                        "success": bool(ok),
+                        "error": err,
+                        "smtp_used": smtp_used,
+                        "email_type": "new_alert",
+                    }
+                )
+
+        if unack_summary_due:
+            due_alerts = list(
+                alerts_col.find(
+                    {"status": "active", "acknowledged": {"$ne": True}},
+                    _alert_email_projection(),
+                )
+            )
+
+            to_send = [
+                a for a in due_alerts
+                if a.get("_id") not in immediate_sent_ids and _alert_email_enabled_for_type(settings, a.get("alert_type"))
+            ]
+            to_skip = [a for a in due_alerts if not _alert_email_enabled_for_type(settings, a.get("alert_type"))]
+
+            if to_skip:
+                skip_ids = [x.get("_id") for x in to_skip if x.get("_id")]
+                alerts_col.update_many(
+                    {"_id": {"$in": skip_ids}},
+                    {"$set": {"last_email_status": "skipped"}},
+                )
+
+            if to_send:
+                subject, text_body, html_body = _build_alert_email_content(to_send, now_ts)
+                ok, err, smtp_used = _send_alert_email(
+                    settings,
+                    recipients,
+                    subject,
+                    text_body,
+                    html_body=html_body,
+                )
+                send_ids = [x.get("_id") for x in to_send if x.get("_id")]
+                alerts_col.update_many(
+                    {"_id": {"$in": send_ids}},
+                    {"$set": {"last_emailed_at": now_ts, "last_email_status": "success" if ok else "failed"}},
+                )
+                email_col.insert_one(
+                    {
+                        "created_at": now_ts,
+                        "subject": subject,
+                        "to": recipients,
+                        "alert_ids": send_ids,
+                        "count": len(send_ids),
+                        "success": bool(ok),
+                        "error": err,
+                        "smtp_used": smtp_used,
+                        "email_type": "alert_summary",
+                    }
+                )
+
+            settings_col.update_one(
+                {"_id": "global"},
+                {"$set": {"last_unack_alert_summary_emailed_at": now_ts}},
+                upsert=True,
+            )
+
+        ack_reminders_enabled = settings.get("acknowledged_alert_email_enabled") != False
+        if not ack_reminders_enabled:
+            return
+
+        ack_interval = _settings_interval(settings, "acknowledged_alert_email_interval_seconds", 86400)
+        ack_due_before = now_ts - ack_interval
+        ack_due_alerts = list(
             alerts_col.find(
                 {
                     "status": "active",
-                    "acknowledged": {"$ne": True},
+                    "acknowledged": True,
+                    "acknowledged_at": {"$lte": ack_due_before},
                     "$or": [
-                        {"last_emailed_at": {"$exists": False}},
-                        {"last_emailed_at": None},
-                        {"last_emailed_at": {"$lte": due_before}},
+                        {"last_ack_reminder_emailed_at": {"$exists": False}},
+                        {"last_ack_reminder_emailed_at": None},
+                        {"last_ack_reminder_emailed_at": {"$lte": ack_due_before}},
                     ],
                 },
-                {
-                    "_id": 1,
-                    "severity": 1,
-                    "nvr_name": 1,
-                    "nvr_ip": 1,
-                    "message": 1,
-                    "alert_type": 1,
-                    "channel": 1,
-                },
+                _alert_email_projection(),
             )
         )
-        if not due_alerts:
+        ack_to_send = [a for a in ack_due_alerts if _alert_email_enabled_for_type(settings, a.get("alert_type"))]
+        if not ack_to_send:
             return
 
-        email_enabled = settings.get("email_enabled") != False
-        email_nvr_offline = settings.get("email_nvr_offline") != False
-        email_nvr_time_drift = settings.get("email_nvr_time_drift") != False
-        email_recording_mismatch = settings.get("email_recording_mismatch") != False
-        email_channel_not_recording = settings.get("email_channel_not_recording") != False
-
-        to_send = []
-        to_skip = []
-
-        for alert in due_alerts:
-            t = alert.get("alert_type")
-            is_enabled = email_enabled
-            if is_enabled:
-                if t == "nvr_offline":
-                    is_enabled = email_nvr_offline
-                elif t == "nvr_time_drift":
-                    is_enabled = email_nvr_time_drift
-                elif t == "recording_expected_mismatch":
-                    is_enabled = email_recording_mismatch
-                elif t == "channel_not_recording":
-                    is_enabled = email_channel_not_recording
-            
-            if is_enabled:
-                to_send.append(alert)
-            else:
-                to_skip.append(alert)
-
-        if to_skip:
-            skip_ids = [x.get("_id") for x in to_skip if x.get("_id")]
-            alerts_col.update_many(
-                {"_id": {"$in": skip_ids}},
-                {"$set": {"last_emailed_at": now_ts, "last_email_status": "skipped"}},
-            )
-
-        if not to_send:
-            return
-
-        subject, text_body, html_body = _build_alert_email_content(to_send, now_ts)
-
+        subject, text_body, html_body = _build_alert_email_content(
+            ack_to_send,
+            now_ts,
+            summary_title="Acknowledged Alert Reminder",
+            subject_prefix="Cams Acknowledged Alert Reminder",
+            acknowledged=True,
+        )
         ok, err, smtp_used = _send_alert_email(
             settings,
             recipients,
@@ -1365,21 +1507,22 @@ def _process_alert_cycle_once():
             text_body,
             html_body=html_body,
         )
-        send_ids = [x.get("_id") for x in to_send if x.get("_id")]
+        ack_send_ids = [x.get("_id") for x in ack_to_send if x.get("_id")]
         alerts_col.update_many(
-            {"_id": {"$in": send_ids}},
-            {"$set": {"last_emailed_at": now_ts, "last_email_status": "success" if ok else "failed"}},
+            {"_id": {"$in": ack_send_ids}},
+            {"$set": {"last_ack_reminder_emailed_at": now_ts, "ack_reminder_email_status": "success" if ok else "failed"}},
         )
         email_col.insert_one(
             {
                 "created_at": now_ts,
                 "subject": subject,
                 "to": recipients,
-                "alert_ids": send_ids,
-                "count": len(send_ids),
+                "alert_ids": ack_send_ids,
+                "count": len(ack_send_ids),
                 "success": bool(ok),
                 "error": err,
                 "smtp_used": smtp_used,
+                "email_type": "acknowledged_reminder",
             }
         )
     except Exception:
@@ -2021,6 +2164,14 @@ def api_get_settings():
         out["alert_email_interval_seconds"] = int(s.get("alert_email_interval_seconds") or 600)
     except Exception:
         out["alert_email_interval_seconds"] = 600
+    try:
+        out["acknowledged_alert_email_enabled"] = bool(s["acknowledged_alert_email_enabled"] if "acknowledged_alert_email_enabled" in s else True)
+    except Exception:
+        out["acknowledged_alert_email_enabled"] = True
+    try:
+        out["acknowledged_alert_email_interval_seconds"] = int(s.get("acknowledged_alert_email_interval_seconds") or 86400)
+    except Exception:
+        out["acknowledged_alert_email_interval_seconds"] = 86400
 
     # Time drift threshold — read from merged settings (file + DB); fall back to file directly.
     try:
@@ -2088,6 +2239,15 @@ def api_set_settings(payload: dict):
                 v = int(payload.get("alert_email_interval_seconds"))
                 if v >= 60:
                     update["alert_email_interval_seconds"] = v
+            except Exception:
+                pass
+        if "acknowledged_alert_email_enabled" in payload:
+            update["acknowledged_alert_email_enabled"] = bool(payload.get("acknowledged_alert_email_enabled"))
+        if "acknowledged_alert_email_interval_seconds" in payload:
+            try:
+                v = int(payload.get("acknowledged_alert_email_interval_seconds"))
+                if v >= 60:
+                    update["acknowledged_alert_email_interval_seconds"] = v
             except Exception:
                 pass
         if "time_tolerance" in payload:
@@ -2804,12 +2964,42 @@ def api_calendar_meta():
 def api_logs():
     try:
         db = app.state.db
+        settings = _get_merged_settings()
+        unack_interval = _settings_interval(settings, "alert_email_interval_seconds", 600)
+        ack_interval = _settings_interval(settings, "acknowledged_alert_email_interval_seconds", 86400)
+        ack_reminders_enabled = settings.get("acknowledged_alert_email_enabled") != False
+        last_summary_at = _parse_int(settings.get("last_unack_alert_summary_emailed_at"))
+        next_unack_summary_at = (last_summary_at + unack_interval) if last_summary_at else None
         active = list(
             db["alerts"].find(
                 {"status": "active"},
-                {"_id": 1, "alert_type": 1, "severity": 1, "nvr_name": 1, "nvr_ip": 1, "channel": 1, "message": 1, "first_seen": 1, "last_seen": 1, "acknowledged": 1, "acknowledged_at": 1},
+                {
+                    "_id": 1,
+                    "alert_type": 1,
+                    "severity": 1,
+                    "nvr_name": 1,
+                    "nvr_ip": 1,
+                    "channel": 1,
+                    "message": 1,
+                    "first_seen": 1,
+                    "last_seen": 1,
+                    "acknowledged": 1,
+                    "acknowledged_at": 1,
+                    "last_emailed_at": 1,
+                    "last_email_status": 1,
+                    "last_ack_reminder_emailed_at": 1,
+                    "ack_reminder_email_status": 1,
+                },
             ).sort([("severity", 1), ("first_seen", -1)])
         )
+        for alert in active:
+            if alert.get("acknowledged"):
+                base = _parse_int(alert.get("last_ack_reminder_emailed_at")) or _parse_int(alert.get("acknowledged_at"))
+                alert["next_ack_reminder_due_at"] = (base + ack_interval) if (ack_reminders_enabled and base) else None
+                alert["next_email_due_at"] = None
+            else:
+                alert["next_email_due_at"] = next_unack_summary_at
+                alert["next_ack_reminder_due_at"] = None
         recent_ack = list(
             db["alert_ack_events"].find(
                 {},
@@ -2819,9 +3009,12 @@ def api_logs():
         emails = list(
             db["email_events"].find(
                 {},
-                {"_id": 0, "created_at": 1, "subject": 1, "to": 1, "count": 1, "success": 1, "error": 1},
+                {"_id": 1, "created_at": 1, "subject": 1, "to": 1, "count": 1, "success": 1, "error": 1, "email_type": 1, "smtp_used": 1},
             ).sort([("created_at", -1)]).limit(200)
         )
+        for email in emails:
+            if "_id" in email:
+                email["_id"] = str(email["_id"])
         critical_count = sum(1 for a in active if a.get("severity") == "critical")
         warning_count = sum(1 for a in active if a.get("severity") == "warning")
         non_critical_count = sum(1 for a in active if a.get("severity") == "non-critical")
@@ -2830,6 +3023,13 @@ def api_logs():
             "active_alerts": active,
             "ack_history": recent_ack,
             "email_history": emails,
+            "email_schedule": {
+                "unack_interval_seconds": unack_interval,
+                "last_unack_summary_at": last_summary_at,
+                "next_unack_summary_at": next_unack_summary_at,
+                "ack_reminders_enabled": ack_reminders_enabled,
+                "ack_interval_seconds": ack_interval,
+            },
             "counts": {
                 "total": len(active),
                 "critical": critical_count,
@@ -2854,7 +3054,7 @@ def api_logs_ack(payload: dict):
             return JSONResponse({"status": "error", "message": "Active alert not found"}, status_code=404)
         db["alerts"].update_one(
             {"_id": alert_id},
-            {"$set": {"acknowledged": True, "acknowledged_at": now_ts}},
+            {"$set": {"acknowledged": True, "acknowledged_at": now_ts, "last_ack_reminder_emailed_at": None, "ack_reminder_email_status": None}},
         )
         db["alert_ack_events"].insert_one(
             {
@@ -2886,7 +3086,7 @@ def api_logs_ack_all(payload: dict):
         ids = [x.get("_id") for x in to_ack if x.get("_id")]
         db["alerts"].update_many(
             {"_id": {"$in": ids}},
-            {"$set": {"acknowledged": True, "acknowledged_at": now_ts}},
+            {"$set": {"acknowledged": True, "acknowledged_at": now_ts, "last_ack_reminder_emailed_at": None, "ack_reminder_email_status": None}},
         )
         if ids:
             rows = []
@@ -2920,7 +3120,7 @@ def api_logs_unack(payload: dict):
             return JSONResponse({"status": "error", "message": "Active alert not found"}, status_code=404)
         db["alerts"].update_one(
             {"_id": alert_id},
-            {"$set": {"acknowledged": False, "acknowledged_at": None}},
+            {"$set": {"acknowledged": False, "acknowledged_at": None, "last_ack_reminder_emailed_at": None, "ack_reminder_email_status": None}},
         )
         return {"status": "ok"}
     except Exception:

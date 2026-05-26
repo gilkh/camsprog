@@ -826,7 +826,7 @@
             </div>
             <table class="data-table">
               <thead>
-                <tr><th>Time</th><th>Status</th><th>SMTP</th><th>Alerts</th><th>Recipients</th><th>Error</th><th></th></tr>
+                <tr><th>Time</th><th>Type</th><th>Status</th><th>SMTP</th><th>Alerts</th><th>Recipients</th><th>Error</th><th></th></tr>
               </thead>
               <tbody id="emails-body"></tbody>
             </table>
@@ -921,6 +921,12 @@
 
       function cleanText(v) {
         return String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+      }
+
+      function formatEmailType(type) {
+        const t = String(type || '').replace(/_/g, ' ');
+        if (!t) return 'Alert summary';
+        return t.charAt(0).toUpperCase() + t.slice(1);
       }
 
       function showToast(message, type = 'info', title = '') {
@@ -1021,7 +1027,14 @@
           return;
         }
         els.alertsEmpty.classList.add('hidden');
-        els.alertsGrid.innerHTML = alerts.map(a => `
+        els.alertsGrid.innerHTML = alerts.map(a => {
+          const nextEmail = a.acknowledged ? a.next_ack_reminder_due_at : a.next_email_due_at;
+          const emailStatus = a.acknowledged ? a.ack_reminder_email_status : a.last_email_status;
+          const lastEmail = a.acknowledged ? a.last_ack_reminder_emailed_at : a.last_emailed_at;
+          const emailLine = a.acknowledged
+            ? `Ack reminder: ${nextEmail ? formatTs(nextEmail) : 'off'}${lastEmail ? ` | Last: ${formatTs(lastEmail)}` : ''}${emailStatus ? ` | ${cleanText(emailStatus)}` : ''}`
+            : `Next summary email: ${nextEmail ? formatTs(nextEmail) : 'not scheduled'}${lastEmail ? ` | Last: ${formatTs(lastEmail)}` : ''}${emailStatus ? ` | ${cleanText(emailStatus)}` : ''}`;
+          return `
           <div class="alert-card ${a.severity || 'warning'} ${a.acknowledged ? 'acknowledged' : ''}" data-id="${cleanText(a._id)}">
             <div class="alert-header">
               <div class="alert-meta-left">
@@ -1039,6 +1052,7 @@
                 <div class="nvr-ip">${cleanText(a.nvr_ip)}${a.channel ? ` | Ch ${a.channel}` : ''}</div>
               </div>
               <div class="alert-message">${cleanText(a.message)}</div>
+              <div class="nvr-ip" style="margin-top: 8px;">${emailLine}</div>
               <div class="alert-actions">
                 ${a.acknowledged 
                   ? `<button class="btn btn-sm" data-action="unack" data-id="${cleanText(a._id)}" title="Re-enable emails">↩ Unack</button>` 
@@ -1047,7 +1061,8 @@
               </div>
             </div>
           </div>
-        `).join('');
+        `;
+        }).join('');
       }
 
       function renderPagination(container, currentPage, totalItems, onPageChange) {
@@ -1099,7 +1114,7 @@
         const start = (emailPage - 1) * ITEMS_PER_PAGE;
         const pageRows = rows.slice(start, start + ITEMS_PER_PAGE);
         if (pageRows.length === 0) {
-          els.emailsBody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: var(--text-dim);">No email history yet</td></tr>`;
+          els.emailsBody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 40px; color: var(--text-dim);">No email history yet</td></tr>`;
           return;
         }
         els.emailsBody.innerHTML = pageRows.map(e => {
@@ -1112,6 +1127,7 @@
           return `
             <tr>
               <td class="mono">${formatTs(e.created_at)}</td>
+              <td>${cleanText(formatEmailType(e.email_type))}</td>
               <td>${status}</td>
               <td class="mono" style="max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${cleanText(smtpUsed)}">${cleanText(smtpUsed)}</td>
               <td>${e.count ?? 0}</td>
@@ -1126,7 +1142,7 @@
       }
 
       async function acknowledgeOne(alertId) {
-        const ok = await showConfirm('Acknowledge Alert', 'This will stop recurring email alerts for this event while it remains active.');
+        const ok = await showConfirm('Acknowledge Alert', 'This will move the alert to the acknowledged reminder interval while it remains active.');
         if (!ok) return;
         try {
           const res = await fetch('/api/logs/ack', {
@@ -1147,7 +1163,7 @@
         const alerts = getFilteredAlerts().filter(x => !x.acknowledged);
         if (!alerts.length) { showToast('No unacknowledged alerts', 'info'); return; }
         const sev = activeFilter === 'all' ? null : activeFilter;
-        const ok = await showConfirm('Acknowledge Alerts', `Acknowledge ${alerts.length} alert(s) and stop repeated emails?`);
+        const ok = await showConfirm('Acknowledge Alerts', `Acknowledge ${alerts.length} alert(s) and move them to the acknowledged reminder interval?`);
         if (!ok) return;
         try {
           const res = await fetch('/api/logs/ack_all', {
@@ -1165,7 +1181,7 @@
       }
 
       async function unacknowledgeOne(alertId) {
-        const ok = await showConfirm('Unacknowledge', 'This will resume recurring email alerts for this event.');
+        const ok = await showConfirm('Unacknowledge', 'This will move the alert back to the normal active alert email summary.');
         if (!ok) return;
         try {
           const res = await fetch('/api/logs/unack', {

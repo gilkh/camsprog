@@ -1082,7 +1082,22 @@
                 <div class="form-group">
                   <label>Alert Email Repeat Interval (minutes)</label>
                   <input type="number" id="alert-email-interval" min="1" max="1440" placeholder="10" />
-                  <div class="help-text">Cooldown limit (min 1m) before repeated notifications are sent for active, unacknowledged alerts.</div>
+                  <div class="help-text">Summary cadence (min 1m) for active, unacknowledged alerts.</div>
+                </div>
+
+                <div class="form-group">
+                  <div class="toggle-wrapper">
+                    <div class="toggle active" id="ack-reminder-enabled-toggle"></div>
+                    <span class="toggle-label">Send reminders for acknowledged alerts that stay active</span>
+                    <input type="checkbox" id="ack-reminder-enabled" checked hidden />
+                  </div>
+                  <div class="help-text">When enabled, acknowledged alerts move to a slower reminder cadence instead of stopping email forever.</div>
+                </div>
+
+                <div class="form-group" id="ack-reminder-options">
+                  <label>Acknowledged Alert Reminder Interval (hours)</label>
+                  <input type="number" id="ack-reminder-interval" min="1" max="720" placeholder="24" />
+                  <div class="help-text">Default is 24h. Turn the reminder off above to stop emails after acknowledgement.</div>
                 </div>
 
                 <div class="form-actions">
@@ -1381,7 +1396,10 @@
       function initToggle(toggleId, checkboxId, onChange) {
         const toggle = document.getElementById(toggleId);
         const checkbox = document.getElementById(checkboxId);
-        toggle.addEventListener('click', () => {
+        const wrapper = toggle.closest('.toggle-wrapper');
+        const clickTarget = wrapper || toggle;
+        clickTarget.addEventListener('click', (e) => {
+          if (e.target.tagName === 'INPUT') return;
           checkbox.checked = !checkbox.checked;
           toggle.classList.toggle('active', checkbox.checked);
           if (onChange) onChange(checkbox.checked);
@@ -1406,6 +1424,17 @@
         }
       }
 
+      function updateAckReminderVisibility(enabled) {
+        const options = document.getElementById('ack-reminder-options');
+        if (enabled) {
+          options.style.opacity = '1';
+          options.style.pointerEvents = 'auto';
+        } else {
+          options.style.opacity = '0.4';
+          options.style.pointerEvents = 'none';
+        }
+      }
+
       const tlsToggle = initToggle('smtp-tls-toggle', 'smtp-tls');
       const emailEnabledToggle = initToggle('email-enabled-toggle', 'email-enabled', (checked) => {
         updateSubOptionsVisibility(checked);
@@ -1414,6 +1443,9 @@
       const emailNvrTimeDriftToggle = initToggle('email-nvr-time-drift-toggle', 'email-nvr-time-drift');
       const emailChannelNotRecordingToggle = initToggle('email-channel-not-recording-toggle', 'email-channel-not-recording');
       const emailRecordingMismatchToggle = initToggle('email-recording-mismatch-toggle', 'email-recording-mismatch');
+      const ackReminderToggle = initToggle('ack-reminder-enabled-toggle', 'ack-reminder-enabled', (checked) => {
+        updateAckReminderVisibility(checked);
+      });
       const bulkConfirmToggle = initToggle('bulk-confirm-toggle', 'bulk-confirm', (checked) => {
         document.getElementById('bulk-pass-btn').disabled = !checked;
       });
@@ -1543,11 +1575,24 @@
           }
           setSmtpStateBadge('primary', data.primary || {});
           setSmtpStateBadge('secondary', data.secondary || {});
-          if (showToastOnSuccess) showToast('SMTP status updated');
+          if (showToastOnSuccess) {
+            const describe = (label, state) => {
+              const s = (state && state.state) ? String(state.state).toLowerCase() : 'unknown';
+              if (s === 'up') return `${label} working`;
+              if (s === 'down') return `${label} not working`;
+              if (s === 'not-configured') return `${label} not configured`;
+              return `${label} unknown`;
+            };
+            const message = `SMTP check complete: ${describe('Primary', data.primary)}, ${describe('Secondary', data.secondary)}`;
+            const hasWorkingServer = [data.primary, data.secondary].some((state) => state && state.state === 'up');
+            showToast(message, hasWorkingServer ? 'success' : 'warning');
+          }
+          return data;
         } catch (err) {
           setSmtpStateBadge('primary', { state: 'unknown' });
           setSmtpStateBadge('secondary', { state: 'unknown' });
           showToast('Failed to check SMTP status', 'error');
+          return null;
         }
       }
 
@@ -1605,12 +1650,17 @@
           const intervalSeconds = Number(s.alert_email_interval_seconds ?? 600);
           const intervalMinutes = Math.max(1, Math.round(intervalSeconds / 60));
           document.getElementById('alert-email-interval').value = intervalMinutes;
+          const ackReminderSeconds = Number(s.acknowledged_alert_email_interval_seconds ?? 86400);
+          const ackReminderHours = Math.max(1, Math.round(ackReminderSeconds / 3600));
+          document.getElementById('ack-reminder-interval').value = ackReminderHours;
           const recipients = Array.isArray(s.smtp_to) ? s.smtp_to : parseRecipients(s.smtp_to);
           document.getElementById('smtp-to').value = recipients.join('\n');
           renderSavedRecipients(recipients);
           tlsToggle.set(Boolean(s.smtp_tls));
           emailEnabledToggle.set(s.email_enabled !== false);
           updateSubOptionsVisibility(s.email_enabled !== false);
+          ackReminderToggle.set(s.acknowledged_alert_email_enabled !== false);
+          updateAckReminderVisibility(s.acknowledged_alert_email_enabled !== false);
           emailNvrOfflineToggle.set(s.email_nvr_offline !== false);
           emailNvrTimeDriftToggle.set(s.email_nvr_time_drift !== false);
           emailChannelNotRecordingToggle.set(s.email_channel_not_recording !== false);
@@ -1683,6 +1733,8 @@
           smtp_from: document.getElementById('smtp-from').value.trim() || null,
           smtp_to: parseRecipients(document.getElementById('smtp-to').value),
           alert_email_interval_seconds: Math.max(1, Number(document.getElementById('alert-email-interval').value) || 10) * 60,
+          acknowledged_alert_email_enabled: ackReminderToggle.get(),
+          acknowledged_alert_email_interval_seconds: Math.max(1, Number(document.getElementById('ack-reminder-interval').value) || 24) * 3600,
         };
         setLoading(btn, true);
         try {
@@ -1771,7 +1823,13 @@
 
       // Check current connection status of primary and secondary servers
       document.getElementById('smtp-check-btn').addEventListener('click', async () => {
-        await checkSmtpStatus(true);
+        const btn = document.getElementById('smtp-check-btn');
+        setLoading(btn, true);
+        try {
+          await checkSmtpStatus(true);
+        } finally {
+          setLoading(btn, false);
+        }
       });
 
       // Bulk NVR credentials updater
@@ -1805,6 +1863,7 @@
           showToast('Request failed', 'error');
         } finally {
           setLoading(btn, false);
+          btn.disabled = !bulkConfirmToggle.get();
         }
       });
 

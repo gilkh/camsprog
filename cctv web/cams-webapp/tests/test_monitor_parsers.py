@@ -170,6 +170,30 @@ class TestHikvisionRecordingConfig(unittest.TestCase):
         self.assertEqual(modes[2], "recording")
         self.assertEqual(modes[3], "not-recording")
 
+    def test_channel_modes_prefer_schedule_action_mode(self):
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <TrackList>
+            <Track>
+                <id>101</id>
+                <DefaultRecordingMode>CMR</DefaultRecordingMode>
+                <SrcDescriptor><SrcChannel>1</SrcChannel></SrcDescriptor>
+                <TrackSchedule>
+                    <ScheduleBlockList>
+                        <ScheduleBlock>
+                            <ScheduleAction>
+                                <Actions>
+                                    <Record>true</Record>
+                                    <ActionRecordingMode>MOTION</ActionRecordingMode>
+                                </Actions>
+                            </ScheduleAction>
+                        </ScheduleBlock>
+                    </ScheduleBlockList>
+                </TrackSchedule>
+            </Track>
+        </TrackList>"""
+        modes = self.m._parse_hikvision_record_tracks_channel_modes(xml)
+        self.assertEqual(modes[1], "motion")
+
 
 class TestHikvisionTimeFormatting(unittest.TestCase):
     def setUp(self):

@@ -2342,6 +2342,7 @@ class MonitorState:
                 chan = None
                 track_id = None
                 rec_mode = None
+                schedule_modes = set()
                 enable_flag = None
                 for child in elem:
                     ct = child.tag
@@ -2363,12 +2364,30 @@ class MonitorState:
                         rec_mode = tx.upper()
                     elif lct == 'enable' or lct.endswith('trackenable'):
                         enable_flag = tx.lower() in ('true', '1')
+                for node in elem.iter():
+                    nt = node.tag
+                    if not isinstance(nt, str):
+                        continue
+                    lnt = nt.lower()
+                    if (
+                        lnt.endswith('actionrecordingmode')
+                        or lnt.endswith('scheduleactionrecordingmode')
+                        or (lnt.endswith('recordingmode') and not lnt.endswith('defaultrecordingmode'))
+                    ):
+                        mode = (node.text or '').strip().upper()
+                        if mode:
+                            schedule_modes.add(mode)
                 if chan is None and track_id is not None and track_id >= 100:
                     chan = track_id // 100
                 if chan is None:
                     continue
                 status = 'not-recording'
-                if rec_mode is not None:
+                if schedule_modes:
+                    if any(mode in {'MR', 'MOTION'} or 'MOTION' in mode for mode in schedule_modes):
+                        status = 'motion'
+                    elif any(mode not in {'OFF', 'NONE', ''} for mode in schedule_modes):
+                        status = 'recording'
+                elif rec_mode is not None:
                     if rec_mode == 'MR':
                         status = 'motion'
                     elif rec_mode and rec_mode not in ('OFF', 'NONE', ''):
