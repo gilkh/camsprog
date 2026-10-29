@@ -57,9 +57,38 @@ Automatic sync is off by default and runs in the web app server, independently o
 whether a browser page is open. It pauses if its saved settings cannot be read.
 
 ## Install
+
+Each computer keeps its own `cctv web/config.json`; Git does not track local
+settings, runtime state, or Python bytecode. `config.example.json` contains empty,
+safe defaults. The Windows launcher copies it only when `config.json` is missing.
+For a manual installation, run this from the `cctv web` directory before starting:
+
+```powershell
+if (!(Test-Path -LiteralPath .\config.json)) {
+    Copy-Item -LiteralPath .\config.example.json -Destination .\config.json
+}
+```
+
 ```powershell
 python -m pip install -r cams-webapp/requirements.txt
 ```
+
+### Updating an older installation
+
+Older versions tracked `config.json`, runtime state, and Python bytecode. If pulling
+reports that local changes would be overwritten, stop the web app and run the
+following from the repository root in PowerShell. The updater backs up local
+settings outside the repository, pulls the code, and restores those settings even
+if the pull fails. It leaves source-code edits alone and retains the backup.
+
+```powershell
+$updater = Join-Path $env:TEMP 'camsprog-update.ps1'
+Invoke-WebRequest 'https://raw.githubusercontent.com/gilkh/camsprog/main/update-local.ps1' -OutFile $updater -ErrorAction Stop
+powershell -NoProfile -ExecutionPolicy Bypass -File $updater
+```
+
+Restart the app afterward. Future pulls leave this computer's configuration alone.
+Once updated, you can also run `.\update-local.ps1` from the repository root.
 
 ## Run
 ```powershell

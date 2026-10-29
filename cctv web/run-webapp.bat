@@ -4,6 +4,15 @@ REM Change to this script's directory
 cd /d "%~dp0"
 echo [Cams Launcher v2] File: %~f0
 
+REM Create a local settings file for new installations; preserve existing settings.
+if not exist "%~dp0config.json" (
+  copy "%~dp0config.example.json" "%~dp0config.json" >nul
+  if errorlevel 1 (
+    echo [ERROR] Could not create local config.json from config.example.json.
+    exit /b 1
+  )
+)
+
 REM Configure bind host/port (edit if needed)
 REM Automatically detect local IP address
 for /f "tokens=*" %%i in ('powershell -NoProfile -Command "$ip = (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } | Select-Object -First 1).IPv4Address[0].IPAddress; if (!$ip) { $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notmatch '^127\.' } | Select-Object -First 1).IPAddress }; if (!$ip) { $ip = '127.0.0.1' }; Write-Host $ip"') do set "LAN_HOST=%%i"

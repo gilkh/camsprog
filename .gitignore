@@ -1,1 +1,12 @@
 cctv web/PORT.txt
+
+# Settings and runtime state belong to each installation.
+/cctv web/config.json
+/cctv web/config.json.tmp
+/cctv web/state.json
+/cctv web/heartbeat.json
+/cctv web/events.json
+
+# Python bytecode varies between computers and interpreter versions.
+__pycache__/
+*.py[cod]

@@ -1,0 +1,23 @@
+{
+  "config": {
+    "poll_interval": 15,
+    "time_tolerance": 120,
+    "email_enabled": false,
+    "alert_enabled": false,
+    "smtp_host": "",
+    "smtp_port": 587,
+    "smtp_username": "",
+    "smtp_password": "",
+    "smtp_from": "",
+    "smtp_to": [],
+    "smtp_tls": true,
+    "auto_time_sync": {
+      "enabled": false,
+      "scope": "all",
+      "nvr_ips": [],
+      "threshold_seconds": 180,
+      "check_interval_seconds": 60
+    }
+  },
+  "nvrs": []
+}
