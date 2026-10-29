@@ -21,6 +21,7 @@ import time
 import xml.etree.ElementTree as ET
 import re
 import copy
+import concurrent.futures
 
 # Fast JSON helpers (prefer orjson)
 try:
@@ -43,7 +44,21 @@ TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
-monitor = MonitorState(poll_interval=15)
+# Read poll_interval from config.json; fall back to 15 if absent
+_default_poll_interval = 15
+try:
+    with open(CONFIG_PATH, "r", encoding="utf-8-sig") as _f:
+        _cfg_data = json.load(_f)
+    if isinstance(_cfg_data, dict):
+        _cfg_section = _cfg_data.get("config", {})
+        if isinstance(_cfg_section, dict):
+            _configured_interval = int(_cfg_section.get("poll_interval", 15))
+            if _configured_interval >= 1:
+                _default_poll_interval = _configured_interval
+except Exception:
+    pass
+
+monitor = MonitorState(poll_interval=_default_poll_interval)
 
 
 def _normalize_smtp_to(value):
@@ -1179,6 +1194,82 @@ def _build_current_alerts(snapshot: list, settings: dict) -> dict:
     return out
 
 
+def _send_to_recipient(recipient, subject, body, from_addr, host, port, use_tls, username, password, html_body=None):
+    """Send email to a single recipient via its own SMTP connection. Returns a result dict."""
+    import smtplib
+    from email.message import EmailMessage
+
+    start = time.time()
+    client = None
+    auth_used = False
+    try:
+        client = smtplib.SMTP(host, port, timeout=8)
+        client.ehlo_or_helo_if_needed()
+        if use_tls:
+            client.starttls()
+            client.ehlo_or_helo_if_needed()
+        if username and password:
+            client.login(username, password)
+            auth_used = True
+
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = from_addr
+        msg["To"] = recipient
+        msg.set_content(body)
+        if html_body:
+            msg.add_alternative(html_body, subtype="html")
+        raw = msg.as_string()
+
+        mail_code, mail_resp = client.mail(from_addr)
+        if int(mail_code) != 250:
+            raise RuntimeError(f"MAIL FROM rejected ({mail_code}): {mail_resp}")
+
+        rcpt_code, rcpt_resp = client.rcpt(recipient)
+        if int(rcpt_code) not in (250, 251):
+            raise RuntimeError(f"RCPT TO {recipient} rejected ({rcpt_code}): {rcpt_resp}")
+
+        data_code, data_resp = client.data(raw)
+        if int(data_code) != 250:
+            raise RuntimeError(f"DATA rejected ({data_code}): {data_resp}")
+
+        duration = time.time() - start
+        return {
+            "recipient": recipient,
+            "success": True,
+            "error": None,
+            "duration": round(duration, 3),
+            "host": host,
+            "port": port,
+            "auth_used": auth_used,
+            "mail_code": int(mail_code),
+            "rcpt_code": int(rcpt_code),
+            "data_code": int(data_code),
+            "data_response": str(
+                data_resp.decode("utf-8", errors="replace")
+                if isinstance(data_resp, (bytes, bytearray))
+                else data_resp
+            ),
+        }
+    except Exception as e:
+        duration = time.time() - start
+        return {
+            "recipient": recipient,
+            "success": False,
+            "error": str(e),
+            "duration": round(duration, 3),
+            "host": host,
+            "port": port,
+            "auth_used": auth_used,
+        }
+    finally:
+        if client is not None:
+            try:
+                client.quit()
+            except Exception:
+                pass
+
+
 def _send_alert_email(settings: dict, recipients: list[str], subject: str, body: str, mode: str = "auto", html_body: str | None = None):
     selected_mode = (mode or "auto").strip().lower()
     targets = _get_smtp_targets(settings, selected_mode)
@@ -1196,94 +1287,97 @@ def _send_alert_email(settings: dict, recipients: list[str], subject: str, body:
         }
 
     try:
-        import smtplib
-        from email.message import EmailMessage
-
         errors = []
         successes = []
-        auth_used = False
+        batch_start = time.time()
+        any_auth_used = False
+        pending = list(recipients)
+
         for host, port in targets:
-            client = None
-            try:
-                client = smtplib.SMTP(host, port, timeout=12)
-                client.ehlo_or_helo_if_needed()
-                if use_tls:
-                    client.starttls()
-                    client.ehlo_or_helo_if_needed()
-                if username and password:
-                    client.login(username, password)
-                    auth_used = True
-                target_deliveries = []
-                for to_addr in recipients:
-                    msg = EmailMessage()
-                    msg["Subject"] = subject
-                    msg["From"] = from_addr
-                    msg["To"] = to_addr
-                    msg.set_content(body)
-                    if html_body:
-                        msg.add_alternative(html_body, subtype="html")
-                    raw = msg.as_string()
+            # Send to all recipients in parallel via ThreadPoolExecutor
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                future_to_recipient = {
+                    executor.submit(
+                        _send_to_recipient,
+                        recipient, subject, body, from_addr,
+                        host, port, use_tls, username, password,
+                        html_body,
+                    ): recipient
+                    for recipient in (recipients if selected_mode == "both" else pending)
+                }
+                results = []
+                for future in concurrent.futures.as_completed(future_to_recipient):
+                    result = future.result()
+                    results.append(result)
 
-                    mail_code, mail_resp = client.mail(from_addr)
-                    if int(mail_code) != 250:
-                        raise RuntimeError(f"MAIL FROM rejected ({mail_code}): {mail_resp}")
+            # Sort results by recipient for consistent ordering
+            results.sort(key=lambda r: r["recipient"])
 
-                    rcpt_code, rcpt_resp = client.rcpt(to_addr)
-                    if int(rcpt_code) not in (250, 251):
-                        raise RuntimeError(f"RCPT TO {to_addr} rejected ({rcpt_code}): {rcpt_resp}")
+            succeeded = [r for r in results if r["success"]]
+            failed = [r for r in results if not r["success"]]
 
-                    data_code, data_resp = client.data(raw)
-                    if int(data_code) != 250:
-                        raise RuntimeError(f"DATA rejected ({data_code}): {data_resp}")
+            if any(r.get("auth_used") for r in results):
+                any_auth_used = True
 
-                    target_deliveries.append(
-                        {
-                            "recipient": to_addr,
-                            "mail_code": int(mail_code),
-                            "rcpt_code": int(rcpt_code),
-                            "data_code": int(data_code),
-                            "data_response": str(data_resp.decode("utf-8", errors="replace") if isinstance(data_resp, (bytes, bytearray)) else data_resp),
-                        }
-                    )
+            target_deliveries = [
+                {
+                    "recipient": r["recipient"],
+                    "mail_code": r.get("mail_code"),
+                    "rcpt_code": r.get("rcpt_code"),
+                    "data_code": r.get("data_code"),
+                    "data_response": r.get("data_response", ""),
+                }
+                for r in succeeded
+            ]
 
+            if succeeded:
                 successes.append({"host": host, "port": port, "deliveries": target_deliveries})
-                if selected_mode != "both":
+            if failed:
+                for r in failed:
+                    errors.append(f"{host}:{port} -> {r['recipient']}: {r['error']}")
+
+            if selected_mode != "both":
+                # Retry only failed recipients on the next SMTP target.
+                pending = [r["recipient"] for r in failed]
+                if not pending:
+                    batch_duration = round(time.time() - batch_start, 3)
                     return True, None, {
                         "mode": selected_mode,
                         "host": host,
                         "port": port,
-                        "deliveries": target_deliveries,
+                        "deliveries": [delivery for target in successes for delivery in target["deliveries"]],
                         "auth_provided": auth_provided,
-                        "auth_used": auth_used,
+                        "auth_used": any_auth_used,
                         "targets": [{"host": h, "port": p} for (h, p) in targets],
+                        "batch_duration": batch_duration,
                     }
-            except Exception as e:
-                errors.append(f"{host}:{port} -> {e}")
-            finally:
-                if client is not None:
-                    try:
-                        client.quit()
-                    except Exception:
-                        pass
-        if selected_mode == "both" and successes:
+
+        batch_duration = round(time.time() - batch_start, 3)
+
+        if selected_mode == "both" and successes and not errors:
             return True, None, {
                 "mode": "both",
                 "targets": successes,
                 "auth_provided": auth_provided,
-                "auth_used": auth_used,
+                "auth_used": any_auth_used,
+                "batch_duration": batch_duration,
             }
         return False, " | ".join(errors), {
             "mode": selected_mode,
             "targets": [{"host": h, "port": p} for (h, p) in targets],
+            "deliveries": successes,
             "auth_provided": auth_provided,
-            "auth_used": auth_used,
+            "auth_used": any_auth_used,
+            "batch_duration": batch_duration,
         }
     except Exception as e:
+        batch_duration = round(time.time() - batch_start, 3)
         return False, str(e), {
             "mode": selected_mode,
             "auth_provided": auth_provided,
             "auth_used": False,
             "targets": [{"host": h, "port": p} for (h, p) in targets],
+            "batch_duration": batch_duration,
         }
 
 
@@ -1551,7 +1645,7 @@ def startup_event():
     monitor.db = app.state.db
     try:
         s = app.state.db["settings"].find_one({"_id": "global"}) or {}
-        ri = int(s.get("refresh_interval") or 15)
+        ri = int(s.get("refresh_interval") or _default_poll_interval)
         if ri >= 1:
             monitor.poll_interval = ri
     except Exception:
