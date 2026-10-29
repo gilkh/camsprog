@@ -10,6 +10,9 @@ from fastapi.responses import JSONResponse, HTMLResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from .monitor import MonitorState, ping_ip
+from .nvr_accounts import AccountReadError, read_accounts
+from .nvr_time import clock_close, clock_offset, sync_onvif_time
+from .auto_time_sync import AutoTimeSync, DEFAULT_POLICY, validate_policy
 from pydantic import BaseModel, Field
 from typing import Optional
 from pymongo import MongoClient
@@ -59,6 +62,8 @@ except Exception:
     pass
 
 monitor = MonitorState(poll_interval=_default_poll_interval)
+_time_sync_locks = {}
+_time_sync_lock_guard = threading.Lock()
 
 
 def _normalize_smtp_to(value):
@@ -1629,6 +1634,11 @@ def _alert_worker_loop(stop_event: threading.Event):
         _process_alert_cycle_once()
         stop_event.wait(30)
 
+
+def _get_auto_time_sync_settings():
+    # Automatic writes must stop if the authoritative settings cannot be read.
+    return app.state.db["settings"].find_one({"_id": "global"}) or {}
+
 class NVRInput(BaseModel):
     name: str
     ip: str
@@ -1660,10 +1670,19 @@ def startup_event():
     )
     app.state.alert_thread.start()
     _process_alert_cycle_once()
+    app.state.auto_time_sync = AutoTimeSync(
+        _get_auto_time_sync_settings, monitor.get_snapshot, api_sync_time,
+        record=lambda result: app.state.db["auto_time_sync_results"].update_one(
+            {"_id": result["ip"]}, {"$set": result}, upsert=True),
+    )
+    app.state.auto_time_sync.start()
 
 
 @app.on_event("shutdown")
 def shutdown_event():
+    auto_sync = getattr(app.state, "auto_time_sync", None)
+    if auto_sync is not None:
+        auto_sync.stop()
     monitor.stop()
     try:
         app.state.alert_stop_event.set()
@@ -1812,6 +1831,63 @@ def api_delete_nvr(ip: str):
     if deleted:
         return {"status": "ok"}
     return JSONResponse({"status": "error", "message": "NVR not found"}, status_code=404)
+
+
+class SavedAccountPassword(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+@app.get("/api/nvrs/{ip}/accounts")
+def api_nvr_accounts(ip: str):
+    nvr = _find_nvr_by_ip(ip)
+    if not nvr:
+        return JSONResponse({"message": "NVR not found"}, status_code=404)
+    try:
+        result = read_accounts(nvr)
+    except AccountReadError as exc:
+        return JSONResponse({"message": str(exc)}, status_code=502, headers={"Cache-Control": "no-store"})
+    try:
+        saved = {item["_id"]["username"] for item in app.state.db["nvr_account_passwords"].find(
+            {"_id.nvr_ip": ip}, {"_id": 1})}
+    except Exception:
+        saved = set()
+    for account in result["accounts"]:
+        account["has_saved_password"] = account["username"] in saved or (
+            account["username"] == nvr.get("username") and bool(nvr.get("password")))
+    result["nvr_name"] = nvr.get("name") or ip
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/nvrs/{ip}/account_password")
+def api_get_account_password(ip: str, username: str):
+    nvr = _find_nvr_by_ip(ip)
+    if not nvr:
+        return JSONResponse({"message": "NVR not found"}, status_code=404)
+    try:
+        saved = app.state.db["nvr_account_passwords"].find_one({"_id": {"nvr_ip": ip, "username": username}})
+    except Exception:
+        return JSONResponse({"message": "Saved passwords are temporarily unavailable."}, status_code=503)
+    password = saved.get("password") if saved else None
+    if not password and username == nvr.get("username"):
+        password = nvr.get("password")
+    if not password:
+        return JSONResponse({"message": "No password has been saved for this account."}, status_code=404)
+    return JSONResponse({"password": password, "source": "Saved in this app"}, headers={"Cache-Control": "no-store"})
+
+
+@app.put("/api/nvrs/{ip}/account_password")
+def api_save_account_password(ip: str, payload: SavedAccountPassword):
+    if not _find_nvr_by_ip(ip):
+        return JSONResponse({"message": "NVR not found"}, status_code=404)
+    try:
+        app.state.db["nvr_account_passwords"].update_one(
+            {"_id": {"nvr_ip": ip, "username": payload.username}},
+            {"$set": {"password": payload.password}}, upsert=True,
+        )
+    except Exception:
+        return JSONResponse({"message": "Could not save the password. Check the database connection."}, status_code=503)
+    return JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/nvrs/{ip}/record_schedule")
@@ -2225,6 +2301,10 @@ def api_get_settings():
         s = _get_merged_settings()
     except Exception:
         s = {}
+    try:
+        out["auto_time_sync"] = validate_policy(s.get("auto_time_sync", {}))
+    except ValueError:
+        out["auto_time_sync"] = copy.deepcopy(DEFAULT_POLICY)
 
     # Refresh interval
     try:
@@ -2299,6 +2379,16 @@ def api_get_settings():
 def api_set_settings(payload: dict):
     try:
         update = {}
+        if "auto_time_sync" in payload:
+            try:
+                policy = validate_policy(payload["auto_time_sync"])
+                if policy["enabled"] and policy["scope"] == "selected":
+                    known = {nvr["ip"] for nvr in monitor.get_snapshot()}
+                    if any(ip not in known for ip in policy["nvr_ips"]):
+                        raise ValueError("One of the selected NVRs no longer exists. Reload the selection.")
+                update["auto_time_sync"] = policy
+            except ValueError as exc:
+                return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
         if "refresh_interval" in payload:
             try:
                 ri = int(payload.get("refresh_interval"))
@@ -2360,7 +2450,8 @@ def api_set_settings(payload: dict):
             try:
                 app.state.db["settings"].update_one({"_id": "global"}, {"$set": update}, upsert=True)
             except Exception:
-                pass
+                if "auto_time_sync" in update:
+                    return JSONResponse({"status": "error", "message": "Automatic sync settings could not be saved. Check the database connection."}, status_code=503)
             # Keep legacy key names in file for backward compatibility.
             update_for_file = dict(update)
             if "smtp_host" in update:
@@ -2368,9 +2459,21 @@ def api_set_settings(payload: dict):
             if "smtp_host_2" in update:
                 update_for_file["smtp_server_2"] = update.get("smtp_host_2")
             _save_settings_to_file(update_for_file)
+            if "auto_time_sync" in update:
+                auto_sync = getattr(app.state, "auto_time_sync", None)
+                if auto_sync is not None:
+                    auto_sync.wake_event.set()
         return {"status": "ok"}
     except Exception:
         return JSONResponse({"status": "error", "message": "Failed to save settings"}, status_code=500)
+
+
+@app.get("/api/auto-time-sync/status")
+def api_auto_time_sync_status():
+    auto_sync = getattr(app.state, "auto_time_sync", None)
+    status = auto_sync.snapshot() if auto_sync is not None else {
+        "running": False, "last_checked_at": None, "next_check_at": None, "results": []}
+    return JSONResponse(status, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/nvrs/password-all")
@@ -2617,6 +2720,17 @@ def api_diagnose(ip: str):
 
 @app.post("/api/nvrs/{ip}/sync_time")
 def api_sync_time(ip: str):
+    with _time_sync_lock_guard:
+        lock = _time_sync_locks.setdefault(ip, threading.Lock())
+    if not lock.acquire(blocking=False):
+        return JSONResponse({"status": "error", "verified": False, "message": "Time sync is already in progress for this recorder."}, status_code=409)
+    try:
+        return _sync_time(ip)
+    finally:
+        lock.release()
+
+
+def _sync_time(ip: str):
     nvr = None
     for x in monitor.get_snapshot():
         if x.get("ip") == ip:
@@ -2624,10 +2738,38 @@ def api_sync_time(ip: str):
             break
     if not nvr:
         return JSONResponse({"status": "error", "message": "NVR not found"}, status_code=404)
-    vendor = (nvr.get("type") or "").strip()
-    username = nvr.get("username") or "admin"
-    password = nvr.get("password") or "admin"
+    vendor = (nvr.get("type") or "").strip().lower()
+    username = nvr.get("username")
+    password = nvr.get("password")
+    if not username or not password:
+        return JSONResponse({"status": "error", "message": "Save the recorder login in Edit NVR first."}, status_code=400)
     now = datetime.now().astimezone()
+
+    def finish(method, details):
+        # Publish this recorder's verified time without polling every other NVR.
+        value = details.get("device_time")
+        try:
+            if isinstance(value, (int, float)):
+                displayed = datetime.fromtimestamp(value, timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                displayed = datetime.fromisoformat(value.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S")
+            with monitor.lock:
+                for stored in monitor.nvrs:
+                    if stored.get("ip") == ip:
+                        stored["nvr_time"] = displayed
+            monitor._notify_listeners()
+        except (ValueError, TypeError, AttributeError):
+            pass
+        return {"status": "ok", "verified": True, "method": method,
+                "message": "Time synced and verified by reading the recorder clock.", **details}
+
+    def native_request(method, url, **kwargs):
+        # Older firmware may offer Basic authentication instead of Digest.
+        for auth in (HTTPDigestAuth(username, password), (username, password)):
+            response = getattr(requests, method)(url, auth=auth, allow_redirects=False, **kwargs)
+            if response.status_code != 401:
+                return response
+        return response
 
     def hikvision_timezone(ts: datetime) -> str:
         # Hikvision expects CST offset with inverted sign convention.
@@ -2639,16 +2781,30 @@ def api_sync_time(ip: str):
         sign = "-" if total_minutes >= 0 else "+"
         return f"CST{sign}{hh}:{mm:02d}:00"
 
-    def read_milesight_time_value(session: requests.Session, web_auth_ok: bool) -> str | None:
-        try:
+    def milesight_request(session, web_auth_ok, query):
+        last_response = None
+        for path in ("/sdk.cgi", "/V1.0/sdk.cgi"):
             if web_auth_ok:
-                resp = monitor._milesight_web_get(session, ip, username, password, "/sdk.cgi", "action=get.system.time", timeout=6)
-            else:
-                resp = requests.get(f"http://{ip}/sdk.cgi?action=get.system.time", auth=(username, password), timeout=6)
-            if resp.status_code != 200:
+                response = monitor._milesight_web_get(session, ip, username, password, path, query, timeout=6)
+                last_response = response
+                if response.status_code == 200:
+                    return response
+            for auth in (HTTPDigestAuth(username, password), (username, password)):
+                response = requests.get(f"http://{ip}{path}?{query}", auth=auth, timeout=6)
+                last_response = response
+                if response.status_code == 200:
+                    return response
+                if response.status_code == 403:
+                    return response
+        return last_response
+
+    def read_milesight_time_value(session, web_auth_ok):
+        try:
+            response = milesight_request(session, web_auth_ok, "action=get.system.time")
+            if response is None or response.status_code != 200:
                 return None
-            return monitor._parse_milesight_time_response(resp.text)
-        except Exception:
+            return monitor._parse_milesight_time_response(response.text)
+        except requests.RequestException:
             return None
 
     def milesight_lockout_message() -> str | None:
@@ -2681,7 +2837,7 @@ def api_sync_time(ip: str):
 
     def read_uniview_timentp_epoch() -> int | None:
         try:
-            resp = requests.get(f"http://{ip}/LAPI/V1.0/System/TimeNTP", auth=HTTPDigestAuth(username, password), timeout=8)
+            resp = native_request("get", f"http://{ip}/LAPI/V1.0/System/TimeNTP", timeout=8)
             if resp.status_code != 200:
                 return None
             payload = resp.json() if resp.text else {}
@@ -2696,33 +2852,43 @@ def api_sync_time(ip: str):
             return None
 
     def uniview_epoch_close_to_target(after_epoch: int, target_epoch: int) -> bool:
-        return abs(after_epoch - target_epoch) <= 180
+        return abs(after_epoch - target_epoch) <= 15
 
     try:
         ok = False
         verification_error = None
-        if vendor in ("Milesight", "Milesight Old"):
+        sync_details = {}
+        if vendor in ("milesight", "milesight old"):
             lock_msg = milesight_lockout_message()
             if lock_msg:
                 return JSONResponse({"status": "error", "message": lock_msg}, status_code=429)
 
-            ts = now.strftime("%Y-%m-%d %H:%M:%S")
-            target_minute = now.strftime("%Y-%m-%d %H:%M")
             session = requests.Session()
             web_auth_ok = monitor._milesight_web_login(session, ip, username, password, timeout=6)
+            if web_auth_ok:
+                # Use the same JSON time API as the recorder's own General page.
+                try:
+                    current = monitor._milesight_web_post_json(session, ip, username, password, "/cgi/main/7000", payload="", timeout=6)
+                    settings = current.json() if current.status_code == 200 else None
+                    if isinstance(settings, dict) and "dateYear" in settings:
+                        payload = {key: settings[key] for key in ("timeZone", "timeZoneName", "ntpServer", "dstEnable", "syncEnable", "syncInterval") if key in settings}
+                        payload.update(syncPc=1, ntpEnable=0, manualTime=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"))
+                        saved = monitor._milesight_web_post_json(session, ip, username, password, "/cgi/main/7001", payload=payload, timeout=8)
+                        if saved.status_code == 200 and saved.text.strip() == "OK":
+                            for _ in range(3):
+                                time.sleep(0.5)
+                                readback = monitor._milesight_web_post_json(session, ip, username, password, "/cgi/main/7000", payload="", timeout=6)
+                                state = readback.json() if readback.status_code == 200 else {}
+                                actual = state.get("serverTime")
+                                if clock_close(actual, datetime.now().astimezone()):
+                                    return finish("Milesight native", {"device_time": actual, "offset_seconds": clock_offset(actual, datetime.now().astimezone())})
+                except (requests.RequestException, ValueError):
+                    pass
             before_time = read_milesight_time_value(session, web_auth_ok)
 
+            ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
             action = f"action=set.system.time&manual_time={requests.utils.quote(ts)}"
-            if web_auth_ok:
-                r = monitor._milesight_web_get(session, ip, username, password, "/sdk.cgi", action, timeout=6)
-            else:
-                url = f"http://{ip}/sdk.cgi?{action}"
-                r = requests.get(url, auth=(username, password), timeout=6)
-
-            if r.status_code != 200:
-                # Some Milesight firmware variants expose SDK under /V1.0.
-                alt_url = f"http://{ip}/V1.0/sdk.cgi?{action}"
-                r = requests.get(alt_url, auth=(username, password), timeout=6)
+            r = milesight_request(session, web_auth_ok, action)
 
             cmd_ok = r.status_code == 200
             after_time = None
@@ -2730,54 +2896,53 @@ def api_sync_time(ip: str):
                 for _ in range(3):
                     time.sleep(0.5)
                     after_time = read_milesight_time_value(session, web_auth_ok)
-                    if after_time:
+                    if clock_close(after_time, datetime.now().astimezone()):
                         break
-                changed = bool(before_time and after_time and before_time != after_time)
-                close_to_target = bool(after_time and after_time.startswith(target_minute))
-                ok = bool(after_time and (changed or close_to_target))
+                ok = clock_close(after_time, datetime.now().astimezone())
+                if ok:
+                    sync_details = {"device_time": after_time, "offset_seconds": clock_offset(after_time, datetime.now().astimezone())}
                 if not ok:
                     verification_error = f"Time verification failed (before={before_time}, after={after_time})"
             else:
                 if r.status_code == 401:
                     verification_error = "Milesight authentication failed on time endpoint"
                 ok = False
-        elif vendor == "Hikvision":
+        elif vendor in ("hikvision", "hik", "hickvision"):
             iso = now.isoformat(timespec="seconds")
             tz = hikvision_timezone(now)
             body = f"""
-<Time>
+<Time version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
   <timeMode>manual</timeMode>
   <localTime>{iso}</localTime>
   <timeZone>{tz}</timeZone>
 </Time>
 """.strip()
             url = f"http://{ip}/ISAPI/System/time"
-            r = requests.put(url, data=body.encode("utf-8"), headers={"Content-Type": "application/xml"}, auth=HTTPDigestAuth(username, password), timeout=8)
-            ok = 200 <= r.status_code < 300
-        elif vendor == "Uniview":
+            r = native_request("put", url, data=body.encode("utf-8"), headers={"Content-Type": "application/xml"}, timeout=8)
+            ok = False
+            if 200 <= r.status_code < 300:
+                for _ in range(3):
+                    check = native_request("get", url, timeout=8)
+                    if check.status_code == 200:
+                        try:
+                            root = ET.fromstring(check.text)
+                            local_time = next((node.text for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "localTime"), None)
+                            ok = clock_close(local_time, datetime.now().astimezone())
+                            if ok:
+                                sync_details = {"device_time": local_time, "offset_seconds": clock_offset(local_time, datetime.now().astimezone())}
+                        except ET.ParseError:
+                            pass
+                    if ok:
+                        break
+                    time.sleep(0.5)
+                if not ok:
+                    verification_error = "Hikvision accepted the request but its clock could not be verified."
+        elif vendor in ("uniview", "unv"):
             # Uniview web UI uses LAPI TimeNTP JSON endpoint for time updates.
             url = f"http://{ip}/LAPI/V1.0/System/TimeNTP"
-            sync_mode_url = f"http://{ip}/LAPI/V1.0/Channels/System/Time/Synchronization"
             before_epoch = read_uniview_timentp_epoch()
 
-            # Disable automatic synchronization so manual DeviceTime writes can take effect.
-            sm_get = requests.get(sync_mode_url, auth=HTTPDigestAuth(username, password), timeout=8)
-            if sm_get.status_code == 200:
-                try:
-                    sm_data = sm_get.json() if sm_get.text else {}
-                    enabled = sm_data.get("Response", {}).get("Data", {}).get("Enabled") if isinstance(sm_data, dict) else None
-                    if int(enabled or 0) != 0:
-                        requests.put(
-                            sync_mode_url,
-                            json={"Enabled": 0},
-                            headers={"Content-Type": "application/json"},
-                            auth=HTTPDigestAuth(username, password),
-                            timeout=8,
-                        )
-                except Exception:
-                    pass
-
-            r = requests.get(url, auth=HTTPDigestAuth(username, password), timeout=8)
+            r = native_request("get", url, timeout=8)
             if r.status_code == 200:
                 data = {}
                 try:
@@ -2790,6 +2955,7 @@ def api_sync_time(ip: str):
                 if not isinstance(cur, dict):
                     cur = {}
 
+                now = datetime.now().astimezone()
                 tz_offsets = [
                     -12, -11, -10, -9, -8, -7, -6, -5, -4.5, -4, -3.5, -3,
                     -2, -1, 0, 1, 2, 3, 3.5, 4, 4.5, 5, 5.5, 5.75, 6, 6.5,
@@ -2809,7 +2975,7 @@ def api_sync_time(ip: str):
                     "DateFormat": int(cur.get("DateFormat", 0) or 0),
                     "HourFormat": int(cur.get("HourFormat", 0) or 0),
                     "NTPServerInfo": {
-                        "Enabled": int(ntp.get("Enabled", 0) or 0),
+                        "Enabled": 0,
                         "AddressType": int(ntp.get("AddressType", 0) or 0),
                         "Address": ntp.get("Address", "") or "",
                         "Port": int(ntp.get("Port", 123) or 123),
@@ -2817,11 +2983,10 @@ def api_sync_time(ip: str):
                     },
                 }
 
-                r = requests.put(
+                r = native_request("put",
                     url,
                     json=payload,
                     headers={"Content-Type": "application/json"},
-                    auth=HTTPDigestAuth(username, password),
                     timeout=8,
                 )
                 if 200 <= r.status_code < 300:
@@ -2829,41 +2994,43 @@ def api_sync_time(ip: str):
                     try:
                         rb = r.json()
                         status_code = rb.get("Response", {}).get("StatusCode") if isinstance(rb, dict) else None
-                        command_ok = (status_code == 0 or status_code == "0" or status_code is None)
+                        command_ok = status_code in (0, "0")
                     except Exception:
-                        command_ok = True
+                        command_ok = False
 
                     if command_ok:
                         after_epoch = None
                         for _ in range(3):
                             time.sleep(0.5)
                             after_epoch = read_uniview_timentp_epoch()
-                            if after_epoch is not None:
+                            # Writes use local-wall-clock epoch; reads return UTC epoch.
+                            if after_epoch is not None and uniview_epoch_close_to_target(after_epoch, int(datetime.now().timestamp())):
                                 break
-                        target_epoch = int(now.timestamp())
-                        changed = bool(
-                            before_epoch is not None
-                            and after_epoch is not None
-                            and abs(after_epoch - before_epoch) >= 30
-                        )
-                        close_to_target = bool(
+                        target_epoch = int(datetime.now().timestamp())
+                        ok = bool(
                             after_epoch is not None
                             and uniview_epoch_close_to_target(after_epoch, target_epoch)
                         )
-                        ok = bool(after_epoch is not None and (changed or close_to_target))
+                        if ok:
+                            sync_details = {"device_time": after_epoch, "offset_seconds": after_epoch - target_epoch}
                         if not ok:
                             verification_error = f"Time verification failed (before={before_epoch}, after={after_epoch}, target={target_epoch})"
                     else:
                         ok = False
         else:
-            return JSONResponse({"status": "error", "message": "Unsupported vendor for sync"}, status_code=400)
+            verification_error = "No native time API is configured for this recorder."
         if ok:
-            monitor.refresh_once()
-            return {"status": "ok"}
-        detail = verification_error or f"Device responded {r.status_code}"
-        return JSONResponse({"status": "error", "message": detail}, status_code=502)
+            return finish(vendor, sync_details)
+        detail = verification_error or f"Native time API responded {r.status_code}"
+    except requests.Timeout:
+        detail = "Native time API timed out."
     except Exception:
-        return JSONResponse({"status": "error", "message": "Sync request failed"}, status_code=500)
+        detail = "Native time sync failed."
+    # Standard fallback also covers devices with no vendor selected.
+    ok, result = sync_onvif_time(nvr)
+    if ok:
+        return finish("ONVIF", result or {})
+    return JSONResponse({"status": "error", "verified": False, "message": f"{detail} {result}"}, status_code=502)
 
 
 @app.post("/api/nvrs/{ip}/shutdown")
@@ -3019,13 +3186,16 @@ def api_sync_time_all():
         try:
             res = api_sync_time(ip)
             if isinstance(res, dict):
-                results.append({"ip": ip, "status": "ok"})
+                payload = res
             else:
-                payload = getattr(res, "body", None)
-                results.append({"ip": ip, "status": "error"})
+                payload = json.loads(res.body)
+            results.append({**payload, "ip": ip, "name": nvr.get("name") or ip})
         except Exception:
-            results.append({"ip": ip, "status": "error"})
-    return {"status": "ok", "results": results}
+            results.append({"ip": ip, "name": nvr.get("name") or ip, "status": "error", "verified": False, "message": "Sync request failed."})
+    verified = sum(result.get("verified") is True for result in results)
+    failed = len(results) - verified
+    return {"status": "ok" if not failed else "partial" if verified else "error",
+            "verified_count": verified, "failed_count": failed, "results": results}
 
 
 @app.get("/api/events")

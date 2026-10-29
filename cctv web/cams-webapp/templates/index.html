@@ -171,6 +171,14 @@
       </div>
     </div>
 
+    <dialog id="accounts-dialog" aria-labelledby="accounts-title">
+      <div class="accounts-heading"><h2 id="accounts-title">Recorder accounts</h2><button type="button" id="accounts-close" aria-label="Close accounts">×</button></div>
+      <p id="accounts-device"></p>
+      <p class="accounts-note">Usernames and roles come from the recorder. Passwords shown here are saved in this app; the recorder does not provide them.</p>
+      <p id="accounts-status" role="status" aria-live="polite"></p>
+      <div id="accounts-list"></div>
+      <button type="button" id="accounts-reload" class="btn-secondary">Reload from recorder</button>
+    </dialog>
   </main>
 
   <script>
@@ -185,6 +193,19 @@
     let activeStatusFilter = null; // 'Online', 'Offline', 'Warning', or null
     let eventSource = null;
     let timeToleranceSec = 120;
+    const timeSyncResults = new Map();
+
+    function showTimeSyncResult(ip, result) {
+      timeSyncResults.set(ip, result);
+      const row = Array.from(document.querySelectorAll('#nvr-body tr[data-ip]')).find(row => row.dataset.ip === ip);
+      if (!row) return;
+      const output = row.querySelector('.time-sync-result');
+      output.textContent = result.message;
+      output.dataset.state = result.state;
+      const button = row.querySelector('.btn-sync');
+      button.disabled = result.state === 'pending';
+      button.textContent = result.state === 'pending' ? 'Syncing…' : 'Sync';
+    }
 
     const WEEK_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -504,10 +525,12 @@
         const typeBadgeHtml = getTypeBadge(nvr.type);
         const actionsHtml = `
           <div class="action-row">
+            <button type="button" class="btn-accounts" data-ip="${escapeHtml(ip)}" title="View recorder accounts" aria-label="View accounts for ${escapeHtml(nvr.name || ip)}"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6M17 14a5 5 0 0 1 4 5v2"/></svg></button>
             <button class="btn-edit" data-ip="${escapeHtml(ip)}" data-tooltip="Edit">Edit</button>
             <button class="btn-delete" data-ip="${escapeHtml(ip)}" data-tooltip="Delete">Del</button>
-            <button class="btn-sync" data-ip="${escapeHtml(ip)}" data-tooltip="Sync NVR Time">Sync</button>
+            <button class="btn-sync" data-ip="${escapeHtml(ip)}" data-tooltip="Sync NVR Time" ${timeSyncResults.get(ip)?.state === 'pending' ? 'disabled' : ''}>${timeSyncResults.get(ip)?.state === 'pending' ? 'Syncing…' : 'Sync'}</button>
           </div>
+          <span class="time-sync-result" role="status" data-state="${timeSyncResults.get(ip)?.state || ''}">${escapeHtml(timeSyncResults.get(ip)?.message || '')}</span>
         `;
 
         // Update cells only if changed (or if row is new)
@@ -810,19 +833,155 @@
       }
       if (syncBtn) {
         const ip = syncBtn.dataset.ip;
+        if (timeSyncResults.get(ip)?.state === 'pending') return;
+        showTimeSyncResult(ip, {state: 'pending', message: 'Setting time and checking recorder clock…'});
         try {
           const res = await fetch(`/api/nvrs/${encodeURIComponent(ip)}/sync_time`, { method: 'POST' });
           const data = await res.json();
-          if (res.ok) {
-            await refreshData();
-            alert('Time synced');
+          if (res.ok && data.verified === true) {
+            const difference = Number.isFinite(data.offset_seconds) ? ` Difference: ${Math.abs(data.offset_seconds).toFixed(1)}s.` : '';
+            showTimeSyncResult(ip, {state: 'success', message: `Synced and verified.${difference}`});
           } else {
-            alert('Sync failed: ' + (data.message || 'Unknown error'));
+            showTimeSyncResult(ip, {state: 'error', message: 'Sync not verified: ' + (data.message || 'Could not confirm the recorder clock.')});
           }
         } catch (err) {
-          alert('Sync request failed');
+          showTimeSyncResult(ip, {state: 'error', message: 'Sync not verified: request failed. Check the connection.'});
         }
       }
+    });
+    const accountsDialog = document.getElementById('accounts-dialog');
+    const accountsList = document.getElementById('accounts-list');
+    const accountsStatus = document.getElementById('accounts-status');
+    let accountsIp = null;
+    let accountsController = null;
+    let accountsOpener = null;
+
+    function closeAccounts() {
+      accountsDialog.close();
+    }
+    accountsDialog.addEventListener('close', () => {
+      if (accountsController) accountsController.abort();
+      accountsList.replaceChildren(); // Remove revealed passwords when dismissed.
+      accountsIp = null;
+      if (accountsOpener && accountsOpener.isConnected) accountsOpener.focus();
+    });
+    document.getElementById('accounts-close').addEventListener('click', closeAccounts);
+    accountsDialog.addEventListener('click', e => {
+      if (e.target === accountsDialog) {
+        const rect = accountsDialog.getBoundingClientRect();
+        if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) closeAccounts();
+      }
+    });
+    async function loadAccounts() {
+      if (accountsController) accountsController.abort();
+      accountsController = new AbortController();
+      const signal = accountsController.signal;
+      accountsList.replaceChildren();
+      accountsStatus.textContent = 'Loading accounts from recorder…';
+      const reload = document.getElementById('accounts-reload');
+      reload.disabled = true;
+      try {
+        const res = await fetch(`/api/nvrs/${encodeURIComponent(accountsIp)}/accounts`, {signal, cache: 'no-store'});
+        const data = await res.json();
+        if (signal.aborted) return;
+        if (!res.ok) throw new Error(data.message || 'Could not load accounts.');
+        document.getElementById('accounts-device').textContent = `${data.nvr_name} · ${accountsIp}`;
+        accountsStatus.textContent = `${data.scope}. ${data.accounts.length} account(s).`;
+        for (const [isAdmin, heading] of [[false, 'Other users'], [true, 'Administrators']]) {
+          const title = document.createElement('h3');
+          title.textContent = heading;
+          accountsList.append(title);
+          const group = data.accounts.filter(account => account.is_admin === isAdmin);
+          if (!group.length) {
+            const empty = document.createElement('p');
+            empty.textContent = 'No accounts returned in this group.';
+            accountsList.append(empty);
+          }
+          for (const account of group) {
+            const card = document.createElement('form');
+            card.className = 'account-card';
+            const label = document.createElement('label');
+            const name = document.createElement('strong');
+            name.textContent = account.username;
+            const role = document.createElement('span');
+            role.textContent = account.role;
+            label.append(name, role);
+            const input = document.createElement('input');
+            input.type = 'password';
+            input.autocomplete = 'new-password';
+            input.maxLength = 1024;
+            input.placeholder = account.has_saved_password ? 'Password saved in app' : 'Enter a known password to save';
+            input.setAttribute('aria-label', `Saved password for ${account.username}`);
+            label.append(input);
+            const buttons = document.createElement('div');
+            buttons.className = 'account-buttons';
+            const reveal = document.createElement('button');
+            reveal.type = 'button';
+            reveal.textContent = 'Show saved';
+            reveal.disabled = !account.has_saved_password;
+            const save = document.createElement('button');
+            save.type = 'submit';
+            save.textContent = 'Save in app';
+            const feedback = document.createElement('span');
+            feedback.setAttribute('role', 'status');
+            reveal.addEventListener('click', async () => {
+              if (input.type === 'text') {
+                input.type = 'password';
+                reveal.textContent = 'Show saved';
+                return;
+              }
+              reveal.disabled = true;
+              try {
+                const res = await fetch(`/api/nvrs/${encodeURIComponent(accountsIp)}/account_password?username=${encodeURIComponent(account.username)}`, {signal, cache: 'no-store'});
+                const result = await res.json();
+                if (signal.aborted) return;
+                if (!res.ok) throw new Error(result.message || 'Could not load password.');
+                input.value = result.password;
+                input.type = 'text';
+                reveal.textContent = 'Hide';
+                feedback.textContent = 'Saved in this app';
+              } catch (err) { if (!signal.aborted) feedback.textContent = err.message; }
+              finally { reveal.disabled = false; }
+            });
+            card.addEventListener('submit', async e => {
+              e.preventDefault();
+              if (!input.value) { feedback.textContent = 'Enter a password first.'; return; }
+              save.disabled = true;
+              try {
+                const res = await fetch(`/api/nvrs/${encodeURIComponent(accountsIp)}/account_password`, {
+                  method: 'PUT', signal, headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({username: account.username, password: input.value})
+                });
+                const result = await res.json();
+                if (signal.aborted) return;
+                if (!res.ok) throw new Error(result.message || 'Could not save password.');
+                input.type = 'password';
+                input.value = '';
+                input.placeholder = 'Password saved in app';
+                reveal.disabled = false;
+                reveal.textContent = 'Show saved';
+                feedback.textContent = 'Saved in app. Recorder password unchanged.';
+              } catch (err) { if (!signal.aborted) feedback.textContent = err.message; }
+              finally { save.disabled = false; }
+            });
+            buttons.append(reveal, save);
+            card.append(label, buttons, feedback);
+            accountsList.append(card);
+          }
+        }
+      } catch (err) {
+        if (!signal.aborted) accountsStatus.textContent = err.message || 'Could not load accounts.';
+      } finally { if (!signal.aborted) reload.disabled = false; }
+    }
+    document.getElementById('accounts-reload').addEventListener('click', loadAccounts);
+    document.addEventListener('click', e => {
+      const button = e.target.closest('.btn-accounts');
+      if (!button) return;
+      accountsOpener = button;
+      accountsIp = button.dataset.ip;
+      document.getElementById('accounts-device').textContent = accountsIp;
+      accountsDialog.showModal();
+      loadAccounts();
     });
   </script>
 </body>

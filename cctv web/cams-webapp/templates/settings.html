@@ -761,6 +761,17 @@
           padding: 10px;
         }
       }
+      #auto-time-sync-form { scroll-margin-top: 100px; }
+      .auto-sync-enable, .auto-sync-targets label { display: flex; flex-direction: row; align-items: center; gap: 10px; cursor: pointer; text-transform: none; letter-spacing: normal; }
+      .auto-sync-enable input, .auto-sync-targets input { width: auto; flex: 0 0 auto; margin: 0; }
+      .auto-sync-targets { display: grid; gap: 12px; max-height: 200px; overflow-y: auto; padding: 10px 0; }
+      .auto-sync-targets label { margin: 0; font-weight: 400; }
+      .auto-sync-enable { font-size: 0.95rem; font-weight: 600; color: var(--text-primary); }
+      .auto-sync-targets label { font-size: 0.9rem; line-height: 1.4; color: var(--text-primary); }
+      .auto-sync-results { margin-top: 16px; font-size: 0.85rem; overflow-wrap: anywhere; }
+      .auto-sync-results p { margin-bottom: 8px; }
+      .auto-sync-results [data-state="failed"] { color: var(--accent-red, #f87171); }
+      .auto-sync-results [data-state="synced"] { color: var(--accent-green, #34d399); }
     </style>
   </head>
   <body class="page-settings">
@@ -911,7 +922,47 @@
                   </svg>
                   Sync All NVRs to Local Time
                 </button>
+                <div id="sync-all-results" role="status" aria-live="polite" style="margin-top: 12px; white-space: pre-wrap; overflow-wrap: anywhere;"></div>
               </div>
+
+              <div class="divider-dashed" style="margin: 20px 0;"></div>
+
+              <form id="auto-time-sync-form">
+                <h3 style="margin-bottom: 12px;">Automatic time sync</h3>
+                <label class="auto-sync-enable" for="auto-sync-enabled">
+                  <input type="checkbox" id="auto-sync-enabled" />
+                  <span>Enable automatic time sync</span>
+                </label>
+                <p class="help-text">Runs while the web app server is running, even with this page closed. Save below to apply changes.</p>
+                <div class="form-group" style="margin-top: 16px;">
+                  <label for="auto-sync-scope">Recorders to sync</label>
+                  <select id="auto-sync-scope">
+                    <option value="all">All NVRs (including newly added recorders)</option>
+                    <option value="selected">Selected NVRs (choose one or more)</option>
+                  </select>
+                </div>
+                <fieldset id="auto-sync-selection" hidden style="border: 0; padding: 0; margin-bottom: 18px;">
+                  <legend>Choose NVRs</legend>
+                  <div id="auto-sync-nvrs" class="auto-sync-targets"></div>
+                  <p id="auto-sync-selection-status" class="help-text" role="status"></p>
+                </fieldset>
+                <div class="form-row">
+                  <div class="form-group">
+                    <label for="auto-sync-threshold">Sync when drift exceeds (minutes)</label>
+                    <input id="auto-sync-threshold" type="number" value="3" min="0.5" max="1440" step="0.5" required />
+                  </div>
+                  <div class="form-group">
+                    <label for="auto-sync-interval">Check clocks every (minutes)</label>
+                    <input id="auto-sync-interval" type="number" value="1" min="1" max="1440" step="1" required />
+                  </div>
+                </div>
+                <p class="help-text">Checks the recorder's current clock and only syncs when it is ahead or behind by more than this amount. Failed attempts wait five minutes before retrying.</p>
+                <div class="form-actions">
+                  <button type="submit" class="btn btn-primary" id="auto-sync-save">Save automatic sync</button>
+                </div>
+                <p id="auto-sync-saved-status" role="status" aria-live="polite" class="help-text"></p>
+                <div id="auto-sync-status" class="auto-sync-results" aria-live="polite"></div>
+              </form>
 
               <div class="divider-dashed" style="margin: 20px 0;"></div>
 
@@ -1668,12 +1719,107 @@
 
           // Time tolerance
           document.getElementById('time-tolerance').value = s.time_tolerance ?? 120;
+          await loadAutoTimeSync(s.auto_time_sync);
 
           await checkSmtpStatus(false);
         } catch (e) {
           showToast('Failed to load settings', 'error');
         }
       }
+
+      let autoSyncTargetsLoaded = false;
+      function updateAutoSyncSelection() {
+        document.getElementById('auto-sync-selection').hidden = document.getElementById('auto-sync-scope').value !== 'selected';
+      }
+      document.getElementById('auto-sync-scope').addEventListener('change', updateAutoSyncSelection);
+
+      async function loadAutoTimeSync(policy = {}) {
+        document.getElementById('auto-sync-enabled').checked = policy.enabled === true;
+        document.getElementById('auto-sync-scope').value = policy.scope || 'all';
+        document.getElementById('auto-sync-threshold').value = (policy.threshold_seconds ?? 180) / 60;
+        document.getElementById('auto-sync-interval').value = (policy.check_interval_seconds ?? 60) / 60;
+        document.getElementById('auto-sync-saved-status').textContent = `Saved setting: automatic sync is ${policy.enabled ? 'on' : 'off'}.`;
+        updateAutoSyncSelection();
+        const list = document.getElementById('auto-sync-nvrs');
+        list.replaceChildren();
+        const selected = new Set(policy.nvr_ips || []);
+        try {
+          const res = await fetch('/api/nvrs');
+          if (!res.ok) throw new Error('Could not load recorders.');
+          const nvrs = await res.json();
+          const known = new Set(nvrs.map(nvr => nvr.ip));
+          for (const ip of selected) if (!known.has(ip)) nvrs.push({ip, name: 'Recorder no longer found'});
+          nvrs.sort((a, b) => (a.name || a.ip).localeCompare(b.name || b.ip));
+          for (const nvr of nvrs) {
+            const label = document.createElement('label');
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.value = nvr.ip;
+            checkbox.checked = selected.has(nvr.ip);
+            label.append(checkbox, document.createTextNode(`${nvr.name || nvr.ip} (${nvr.ip})`));
+            list.append(label);
+          }
+          autoSyncTargetsLoaded = true;
+          document.getElementById('auto-sync-selection-status').textContent = nvrs.length ? 'Select one recorder or several.' : 'Add an NVR to select it here.';
+        } catch (err) {
+          autoSyncTargetsLoaded = false;
+          document.getElementById('auto-sync-selection-status').textContent = 'Could not load the NVR selection. Reload this page to try again.';
+        }
+        await refreshAutoSyncStatus();
+      }
+
+      async function refreshAutoSyncStatus() {
+        try {
+          const res = await fetch('/api/auto-time-sync/status', {cache: 'no-store'});
+          if (!res.ok) throw new Error();
+          const status = await res.json();
+          const container = document.getElementById('auto-sync-status');
+          container.replaceChildren();
+          const summary = document.createElement('p');
+          summary.textContent = status.settings_error || (status.running ? 'Checking recorder clocks…' : status.last_checked_at ? `Last check: ${new Date(status.last_checked_at * 1000).toLocaleString()}` : 'No automatic clock checks have run yet.');
+          container.append(summary);
+          const labels = {synced: 'Synced and verified', within_threshold: 'Within threshold', failed: 'Failed', cooldown: 'Waiting to retry', skipped: 'Skipped'};
+          for (const result of status.results || []) {
+            const row = document.createElement('p');
+            const drift = Number.isFinite(result.after_offset_seconds)
+              ? ` · before ${Math.abs(result.offset_seconds).toFixed(1)}s; after ${Math.abs(result.after_offset_seconds).toFixed(1)}s`
+              : Number.isFinite(result.offset_seconds) ? ` · drift ${Math.abs(result.offset_seconds).toFixed(1)}s` : '';
+            row.textContent = `${result.name || result.ip}: ${labels[result.state] || result.state}${drift}`;
+            if (['failed', 'cooldown', 'skipped'].includes(result.state)) row.textContent += ` — ${result.message}`;
+            row.dataset.state = result.state;
+            container.append(row);
+          }
+        } catch (err) {
+          document.getElementById('auto-sync-status').textContent = 'Automatic sync status is temporarily unavailable.';
+        }
+      }
+
+      document.getElementById('auto-time-sync-form').addEventListener('submit', async e => {
+        e.preventDefault();
+        const policy = {
+          enabled: document.getElementById('auto-sync-enabled').checked,
+          scope: document.getElementById('auto-sync-scope').value,
+          nvr_ips: Array.from(document.querySelectorAll('#auto-sync-nvrs input:checked')).map(input => input.value),
+          threshold_seconds: Number(document.getElementById('auto-sync-threshold').value) * 60,
+          check_interval_seconds: Number(document.getElementById('auto-sync-interval').value) * 60,
+        };
+        if (policy.enabled && policy.scope === 'selected' && (!autoSyncTargetsLoaded || !policy.nvr_ips.length)) {
+          showToast('Select at least one NVR, or choose all NVRs.', 'error');
+          return;
+        }
+        const button = document.getElementById('auto-sync-save');
+        setLoading(button, true);
+        try {
+          const res = await fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({auto_time_sync: policy})});
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.message || 'Could not save automatic sync.');
+          document.getElementById('auto-sync-saved-status').textContent = `Saved setting: automatic sync is ${policy.enabled ? 'on' : 'off'}.`;
+          showToast('Automatic time sync settings saved.');
+          await refreshAutoSyncStatus();
+        } catch (err) { showToast(err.message, 'error'); }
+        finally { setLoading(button, false); }
+      });
+      setInterval(refreshAutoSyncStatus, 15000);
 
       // Refresh interval preset changes
       document.getElementById('refresh-preset').addEventListener('change', (e) => {
@@ -1874,16 +2020,23 @@
         if (!confirmed) return;
 
         setLoading(btn, true);
+        const results = document.getElementById('sync-all-results');
+        results.textContent = 'Synchronizing recorders and verifying their clocks…';
         try {
           const res = await fetch('/api/nvrs/sync_time_all', { method: 'POST' });
           const data = await res.json();
-          if (res.ok) {
-            showToast('Time synchronized for all available NVRs');
+          if (res.ok && Array.isArray(data.results)) {
+            results.textContent = `${data.verified_count} verified, ${data.failed_count} not verified.\n` + data.results.map(result =>
+              `${result.name || result.ip}: ${result.verified ? 'Synced and verified' : 'Not verified'}${result.verified ? '' : ' — ' + (result.message || 'Unknown error')}`
+            ).join('\n');
+            showToast(`${data.verified_count} clocks verified; ${data.failed_count} not verified.`, data.failed_count ? 'error' : 'success');
           } else {
-            showToast('Sync failed: ' + (data.message || 'Unknown error'), 'error');
+            results.textContent = 'Sync failed: ' + (data.message || 'Unknown error');
+            showToast(results.textContent, 'error');
           }
         } catch (err) {
-          showToast('Request failed', 'error');
+          results.textContent = 'Sync not verified: request failed.';
+          showToast(results.textContent, 'error');
         } finally {
           setLoading(btn, false);
         }

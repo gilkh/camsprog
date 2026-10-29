@@ -727,6 +727,25 @@ tr.offline td {
   white-space: nowrap;
 }
 
+td button.btn-accounts { padding: 5px 7px; display: inline-flex; align-items: center; }
+.time-sync-result { display: block; white-space: normal; max-width: 260px; font-size: 0.75rem; margin-top: 5px; }
+.time-sync-result:empty { display: none; }
+.time-sync-result[data-state="success"] { color: var(--accent-green, #34d399); }
+.time-sync-result[data-state="error"] { color: var(--accent-red); }
+.time-sync-result[data-state="pending"] { color: var(--text-secondary); }
+#accounts-dialog { margin: auto; box-sizing: border-box; width: min(540px, 90vw); max-height: 85vh; overflow: auto; padding: 24px; border: 1px solid var(--border-medium); border-radius: var(--radius-xl); background: var(--bg-secondary); color: var(--text-primary); }
+#accounts-dialog::backdrop { background: rgba(0, 0, 0, 0.65); }
+.accounts-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.accounts-heading h2 { margin: 0; font-size: 1.2rem; }
+#accounts-dialog button { cursor: pointer; border: 1px solid var(--border-medium); border-radius: var(--radius-sm); padding: 7px 10px; background: transparent; color: var(--text-primary); font: inherit; }
+#accounts-dialog button:disabled { opacity: 0.5; cursor: default; }
+.accounts-note, #accounts-device, .account-card span { color: var(--text-secondary); font-size: 0.85rem; }
+.account-card { display: grid; gap: 10px; padding: 14px 0; border-top: 1px solid var(--border-medium); }
+.account-card label { display: grid; gap: 7px; text-transform: none; letter-spacing: normal; }
+.account-card input { width: 100%; box-sizing: border-box; }
+.account-buttons { display: flex; gap: 8px; }
+#accounts-reload { margin-top: 16px; }
+
 td button {
   font-size: 0.75rem;
   font-family: inherit;
