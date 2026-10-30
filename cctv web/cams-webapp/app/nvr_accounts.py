@@ -125,3 +125,70 @@ def _check_response(response):
         raise AccountReadError("The recorder refused access. Its saved login needs permission to read accounts; ONVIF may require a separate login.")
     if response.status_code != 200:
         raise AccountReadError("The recorder's account service is unavailable or unsupported on this firmware.")
+
+
+def check_credentials(nvr, username, password):
+    """Verify one supplied login without writing recorder settings or reading users."""
+    def result(verified, message):
+        return {"verified": verified, "message": message}
+
+    host = nvr['ip']
+    if ':' in host and not host.startswith('['):
+        host = f'[{host}]'
+    base = f'http://{host}'
+    vendor = (nvr.get('type') or '').lower()
+    try:
+        if vendor in ('milesight', 'milesight old'):
+            helper = MonitorState()
+            uri = '/cgi/main/1000'
+            with requests.Session() as session:
+                reply = session.post(base + uri, headers={
+                    'Authorization': helper._milesight_digest_auth_header(username, password, uri, 'POST'),
+                    'Content-Type': 'application/json'},
+                    json={'userName': username, 'md5': helper._milesight_md5(password)},
+                    timeout=8, allow_redirects=False)
+                if reply.status_code == 200:
+                    data = reply.json()
+                    if isinstance(data, dict) and str(data.get('type')) == '0':
+                        return result(True, 'Credentials verified.')
+                    if isinstance(data, dict) and int(data.get('blankTime') or 0) > 0:
+                        return result(False, 'Account temporarily locked. Try again later.')
+                return result(False, 'Login not accepted. Check the password, account status, and recorder access.')
+
+        if vendor == 'hikvision':
+            url = base + '/ISAPI/System/deviceInfo'
+            anonymous = requests.get(url, timeout=8, allow_redirects=False)
+            if anonymous.status_code != 401:
+                return result(False, 'Could not verify: the recorder did not require authentication for this check.')
+            reply = requests.get(url, auth=HTTPDigestAuth(username, password), timeout=8, allow_redirects=False)
+            if reply.status_code == 401:
+                return result(False, 'Login rejected. Check the username and password.')
+            if reply.status_code == 403:
+                return result(False, 'Could not verify: this account lacks permission for the check.')
+            if reply.status_code == 200 and _name(ET.fromstring(reply.text)) == 'DeviceInfo':
+                return result(True, 'Credentials verified.')
+        else:
+            url = base + '/onvif/device_service'
+            headers = {'Content-Type': 'application/soap+xml; charset=utf-8; action="http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation"'}
+            anonymous = requests.post(url, data=b'<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><GetDeviceInformation xmlns="http://www.onvif.org/ver10/device/wsdl"/></s:Body></s:Envelope>', headers=headers, timeout=8, allow_redirects=False)
+            if anonymous.status_code == 200:
+                root = ET.fromstring(anonymous.text)
+                if any(_name(node) == 'GetDeviceInformationResponse' for node in root.iter()):
+                    return result(False, 'Could not verify: ONVIF allows this check without a login.')
+            elif anonymous.status_code not in (401, 403, 500):
+                return result(False, 'Could not verify: ONVIF is unavailable or unsupported.')
+            reply = requests.post(url, auth=HTTPDigestAuth(username, password),
+                                  data=_onvif_envelope(username, password, 'GetDeviceInformation'),
+                                  headers=headers, timeout=8, allow_redirects=False)
+            if reply.status_code == 200:
+                root = ET.fromstring(reply.text)
+                if not any(_name(node) == 'Fault' for node in root.iter()) and any(_name(node) == 'GetDeviceInformationResponse' for node in root.iter()):
+                    return result(True, 'ONVIF credentials verified.')
+            return result(False, 'ONVIF login not verified. Check credentials, permissions, ONVIF access, and recorder time.')
+        return result(False, 'Could not verify credentials on this recorder.')
+    except requests.Timeout:
+        return result(False, 'Recorder timed out. Try again when it is reachable.')
+    except requests.RequestException:
+        return result(False, 'Could not connect to the recorder.')
+    except (ValueError, ET.ParseError, TypeError):
+        return result(False, 'Could not verify: the recorder returned an unexpected response.')

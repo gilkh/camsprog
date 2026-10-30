@@ -49,6 +49,21 @@ class AutoSyncTests(unittest.TestCase):
         self.sync.assert_not_called()
         self.assertTrue(all(r['state'] == 'within_threshold' for r in result))
 
+    def test_dashboard_mode_tracks_warning_threshold_in_both_directions(self):
+        self.policy['match_warning_threshold'] = True
+        settings = {'auto_time_sync': self.policy, 'time_tolerance': 120}
+        self.worker.get_settings = lambda: settings
+        self.nvrs = self.nvrs[:1]
+        for threshold, offset, expected in [(120, 121, True), (120, -121, True),
+                                            (120, 120, False), (240, 121, False)]:
+            with self.subTest(threshold=threshold, offset=offset):
+                settings['time_tolerance'] = threshold
+                self.worker.last_attempt.clear()
+                self.sync.reset_mock()
+                with patch('app.auto_time_sync.clock_offset', return_value=offset):
+                    self.worker.run_once()
+                self.assertEqual(bool(self.sync.call_count), expected)
+
     def test_threshold_is_strict_and_covers_ahead_and_behind(self):
         self.nvrs = self.nvrs[:1]
         for offset, should_sync in [(180, False), (-180, False), (181, True), (-181, True)]:
@@ -112,7 +127,7 @@ class AutoSyncTests(unittest.TestCase):
 
 class AutoSyncSettingsTests(unittest.TestCase):
     def test_invalid_settings_are_rejected(self):
-        for changes in [{'enabled': 'true'}, {'scope': 'other'}, {'threshold_seconds': -1},
+        for changes in [{'enabled': 'true'}, {'match_warning_threshold': 'true'}, {'scope': 'other'}, {'threshold_seconds': -1},
                         {'check_interval_seconds': 0}, {'nvr_ips': '192.0.2.1'},
                         {'enabled': True, 'scope': 'selected', 'nvr_ips': []}]:
             with self.subTest(changes=changes), self.assertRaises(ValueError):

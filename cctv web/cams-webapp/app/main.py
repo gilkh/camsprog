@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, HTMLResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from .monitor import MonitorState, ping_ip
-from .nvr_accounts import AccountReadError, read_accounts
+from .nvr_accounts import AccountReadError, read_accounts, check_credentials
 from .nvr_time import clock_close, clock_offset, sync_onvif_time
 from .auto_time_sync import AutoTimeSync, DEFAULT_POLICY, validate_policy
 from pydantic import BaseModel, Field
@@ -1637,7 +1637,8 @@ def _alert_worker_loop(stop_event: threading.Event):
 
 def _get_auto_time_sync_settings():
     # Automatic writes must stop if the authoritative settings cannot be read.
-    return app.state.db["settings"].find_one({"_id": "global"}) or {}
+    saved = app.state.db["settings"].find_one({"_id": "global"}) or {}
+    return {**_load_settings_from_file(), **saved}
 
 class NVRInput(BaseModel):
     name: str
@@ -1836,6 +1837,26 @@ def api_delete_nvr(ip: str):
 class SavedAccountPassword(BaseModel):
     username: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=1, max_length=1024)
+
+
+class AccountCredentialTest(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: Optional[str] = Field(default=None, min_length=1, max_length=1024)
+
+
+@app.post("/api/nvrs/{ip}/test_credentials")
+def api_test_account_credentials(ip: str, payload: AccountCredentialTest):
+    nvr = _find_nvr_by_ip(ip)
+    if not nvr:
+        return JSONResponse({"message": "NVR not found"}, status_code=404)
+    password = payload.password
+    if password is None:
+        saved = api_get_account_password(ip, payload.username)
+        if saved.status_code != 200:
+            return saved
+        password = json.loads(saved.body)['password']
+    result = check_credentials(nvr, payload.username, password)
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/nvrs/{ip}/accounts")

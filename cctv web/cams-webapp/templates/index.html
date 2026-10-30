@@ -91,6 +91,15 @@
       </div>
     </div>
 
+    <section class="sync-panel" aria-label="Recorder time synchronization">
+      <div><h2>Recorder time</h2><p id="dashboard-auto-summary">Loading automatic sync settings…</p></div>
+      <div class="sync-controls">
+        <button type="button" id="dashboard-auto-sync" class="btn-secondary" disabled aria-pressed="false">Enable auto sync</button>
+        <button type="button" id="dashboard-sync-all" class="btn-primary">Sync all NVRs</button>
+      </div>
+      <p id="dashboard-sync-status" role="status" aria-live="polite"></p>
+    </section>
+
     <!-- NVR Table -->
       <div class="table-header">
         <h2>NVR Devices</h2>
@@ -172,12 +181,12 @@
     </div>
 
     <dialog id="accounts-dialog" aria-labelledby="accounts-title">
-      <div class="accounts-heading"><h2 id="accounts-title">Recorder accounts</h2><button type="button" id="accounts-close" aria-label="Close accounts">×</button></div>
-      <p id="accounts-device"></p>
-      <p class="accounts-note">Usernames and roles come from the recorder. Passwords shown here are saved in this app; the recorder does not provide them.</p>
-      <p id="accounts-status" role="status" aria-live="polite"></p>
-      <div id="accounts-list"></div>
-      <button type="button" id="accounts-reload" class="btn-secondary">Reload from recorder</button>
+      <div class="accounts-heading"><div><p class="accounts-eyebrow">DEVICE ACCESS</p><h2 id="accounts-title">Recorder accounts</h2><p id="accounts-device"></p></div><button type="button" id="accounts-close" aria-label="Close accounts">×</button></div>
+      <div class="accounts-content">
+        <p id="accounts-status" role="status" aria-live="polite"></p>
+        <div id="accounts-list"></div>
+      </div>
+      <div class="accounts-footer"><span>Passwords are hidden when this panel closes.</span><button type="button" id="accounts-reload" class="btn-secondary">↻ Reload accounts</button></div>
     </dialog>
   </main>
 
@@ -194,6 +203,75 @@
     let eventSource = null;
     let timeToleranceSec = 120;
     const timeSyncResults = new Map();
+    let dashboardAutoPolicy = null;
+    let lastAutoCheck = null;
+
+    async function refreshDashboardAutoStatus() {
+      if (document.hidden || !dashboardAutoPolicy?.enabled) return;
+      try {
+        const res = await fetch('/api/auto-time-sync/status', {cache: 'no-store'});
+        if (!res.ok) throw new Error('Status unavailable');
+        const status = await res.json();
+        if (status.settings_error) {
+          document.getElementById('dashboard-sync-status').textContent = status.settings_error;
+        } else if (status.last_checked_at && status.last_checked_at !== lastAutoCheck) {
+          lastAutoCheck = status.last_checked_at;
+          for (const result of status.results) {
+            if (!['synced', 'failed'].includes(result.state) || timeSyncResults.get(result.ip)?.state === 'pending') continue;
+            showTimeSyncResult(result.ip, {state: result.state === 'synced' ? 'success' : 'error', message: `Auto sync: ${result.message}`});
+          }
+        }
+      } catch (err) { /* The server worker continues independently of this status display. */ }
+    }
+    setInterval(refreshDashboardAutoStatus, 15000);
+
+    function updateAutoSyncControl(policy) {
+      dashboardAutoPolicy = policy;
+      const button = document.getElementById('dashboard-auto-sync');
+      button.disabled = false;
+      button.setAttribute('aria-pressed', String(policy.enabled));
+      button.textContent = policy.enabled ? 'Disable auto sync' : 'Enable auto sync';
+      const threshold = policy.match_warning_threshold ? timeToleranceSec : policy.threshold_seconds;
+      document.getElementById('dashboard-auto-summary').textContent = policy.enabled
+        ? `Auto sync on · ${policy.scope === 'all' ? 'All NVRs' : 'Selected NVRs'} · Checks every ${policy.check_interval_seconds}s · Corrects drift over ${threshold}s.`
+        : 'Auto sync is off. Enable it to automatically correct clocks marked with a red underline, even when this page is closed.';
+    }
+
+    document.getElementById('dashboard-auto-sync').addEventListener('click', async () => {
+      if (!dashboardAutoPolicy) return;
+      const button = document.getElementById('dashboard-auto-sync');
+      button.disabled = true;
+      const policy = {...dashboardAutoPolicy, enabled: !dashboardAutoPolicy.enabled};
+      if (policy.enabled) Object.assign(policy, {scope: 'all', nvr_ips: [], match_warning_threshold: true, threshold_seconds: timeToleranceSec, check_interval_seconds: 60});
+      try {
+        const res = await fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({auto_time_sync: policy})});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Could not save automatic sync.');
+        updateAutoSyncControl(policy);
+        refreshDashboardAutoStatus();
+        document.getElementById('dashboard-sync-status').textContent = policy.enabled ? 'Automatic correction enabled for all NVRs. Clocks are checked on the server.' : 'Automatic correction disabled.';
+      } catch (err) {
+        document.getElementById('dashboard-sync-status').textContent = err.message;
+      } finally { button.disabled = false; }
+    });
+
+    document.getElementById('dashboard-sync-all').addEventListener('click', async () => {
+      const button = document.getElementById('dashboard-sync-all');
+      const status = document.getElementById('dashboard-sync-status');
+      button.disabled = true;
+      button.textContent = 'Syncing…';
+      status.textContent = 'Synchronizing all NVRs to the server clock and verifying each result…';
+      try {
+        const res = await fetch('/api/nvrs/sync_time_all', {method: 'POST'});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Could not sync recorders.');
+        for (const result of data.results) {
+          showTimeSyncResult(result.ip, {state: result.verified ? 'success' : 'error', message: result.verified ? 'Synced and verified.' : result.message || 'Sync could not be verified.'});
+        }
+        status.textContent = `${data.verified_count} synced and verified · ${data.failed_count} failed · ${data.results.length} NVRs. Results appear in each recorder row.`;
+      } catch (err) { status.textContent = err.message; }
+      finally { button.disabled = false; button.textContent = 'Sync all NVRs'; }
+    });
 
     function showTimeSyncResult(ip, result) {
       timeSyncResults.set(ip, result);
@@ -625,11 +703,16 @@
         const s = await res.json();
         const ri = Number(s.refresh_interval ?? 60);
         timeToleranceSec = Number(s.time_tolerance ?? 120);
+        if (s.auto_time_sync) {
+          updateAutoSyncControl(s.auto_time_sync);
+          refreshDashboardAutoStatus();
+        }
         startAutoRefresh(Math.max(1, ri));
         if (lastNvrs && lastNvrs.length > 0) {
           renderTable(lastNvrs);
         }
       } catch (e) {
+        document.getElementById('dashboard-auto-summary').textContent = 'Could not load automatic sync settings. Refresh to try again.';
         startAutoRefresh(60);
       }
     }
@@ -887,66 +970,181 @@
         if (!res.ok) throw new Error(data.message || 'Could not load accounts.');
         document.getElementById('accounts-device').textContent = `${data.nvr_name} · ${accountsIp}`;
         accountsStatus.textContent = `${data.scope}. ${data.accounts.length} account(s).`;
-        for (const [isAdmin, heading] of [[false, 'Other users'], [true, 'Administrators']]) {
-          const title = document.createElement('h3');
-          title.textContent = heading;
-          accountsList.append(title);
+        for (const [isAdmin, heading] of [[true, 'Administrators'], [false, 'Other users']]) {
           const group = data.accounts.filter(account => account.is_admin === isAdmin);
-          if (!group.length) {
-            const empty = document.createElement('p');
-            empty.textContent = 'No accounts returned in this group.';
-            accountsList.append(empty);
-          }
+          if (!group.length) continue;
+          const section = document.createElement('section');
+          section.className = 'account-group';
+          const title = document.createElement('h3');
+          title.textContent = `${heading} (${group.length})`;
+          section.append(title);
+          accountsList.append(section);
           for (const account of group) {
             const card = document.createElement('form');
             card.className = 'account-card';
-            const label = document.createElement('label');
+            const identity = document.createElement('div');
+            identity.className = 'account-identity';
+            const avatar = document.createElement('span');
+            avatar.className = 'account-avatar';
+            avatar.textContent = account.username.slice(0, 2).toUpperCase();
+            const label = document.createElement('div');
+            label.className = 'account-password';
             const name = document.createElement('strong');
             name.textContent = account.username;
             const role = document.createElement('span');
+            role.className = 'account-role';
             role.textContent = account.role;
-            label.append(name, role);
+            const roleHint = {operator: 'Controls cameras and playback.', viewer: 'Views cameras and playback.', view: 'Views cameras and playback.'}[(account.role || '').toLowerCase()];
+            if (roleHint) {
+              role.dataset.tooltip = roleHint;
+              role.tabIndex = 0;
+              role.setAttribute('aria-label', `${account.role}: ${roleHint}`);
+            }
+            identity.append(avatar, name, role);
+            const fieldTitle = document.createElement('span');
+            fieldTitle.textContent = 'Saved password';
+            label.append(fieldTitle);
             const input = document.createElement('input');
             input.type = 'password';
             input.autocomplete = 'new-password';
             input.maxLength = 1024;
-            input.placeholder = account.has_saved_password ? 'Password saved in app' : 'Enter a known password to save';
+            input.placeholder = 'Enter a password';
             input.setAttribute('aria-label', `Saved password for ${account.username}`);
-            label.append(input);
-            const buttons = document.createElement('div');
-            buttons.className = 'account-buttons';
+            const passwordRow = document.createElement('div');
+            passwordRow.className = 'account-password-row';
             const reveal = document.createElement('button');
             reveal.type = 'button';
-            reveal.textContent = 'Show saved';
-            reveal.disabled = !account.has_saved_password;
+            reveal.className = 'account-saved-password password-cell';
+            reveal.textContent = '••••••';
+            reveal.title = 'Click to reveal for 15 seconds';
+            reveal.setAttribute('aria-label', `Reveal saved password for ${account.username}`);
+            reveal.setAttribute('aria-pressed', 'false');
             const save = document.createElement('button');
+            save.className = 'account-save';
             save.type = 'submit';
-            save.textContent = 'Save in app';
+            save.textContent = 'Save';
+            const test = document.createElement('button');
+            test.type = 'button';
+            test.className = 'account-test';
+            test.textContent = 'Test';
+            test.setAttribute('aria-label', `Test credentials for ${account.username}`);
+            const edit = document.createElement('button');
+            edit.type = 'button';
+            edit.className = 'account-edit';
+            edit.textContent = 'Edit';
+            edit.setAttribute('aria-label', `Edit saved password for ${account.username}`);
+            const cancel = document.createElement('button');
+            cancel.type = 'button';
+            cancel.textContent = 'Cancel';
+            cancel.setAttribute('aria-label', `Cancel password edit for ${account.username}`);
             const feedback = document.createElement('span');
+            feedback.className = 'account-feedback';
             feedback.setAttribute('role', 'status');
+            let hideTimer = null;
+            let editingPassword = !account.has_saved_password;
+            function hideSavedPassword() {
+              clearTimeout(hideTimer);
+              reveal.textContent = '••••••';
+              reveal.dataset.revealed = 'false';
+              reveal.setAttribute('aria-pressed', 'false');
+              reveal.setAttribute('aria-label', `Reveal saved password for ${account.username}`);
+            }
+            signal.addEventListener('abort', hideSavedPassword, {once: true});
+            function showSavedState() {
+              editingPassword = false;
+              input.value = '';
+              passwordRow.replaceChildren(reveal, edit, test);
+              hideSavedPassword();
+            }
+            edit.addEventListener('click', () => {
+              hideSavedPassword();
+              editingPassword = true;
+              input.value = '';
+              input.placeholder = 'Enter replacement password';
+              passwordRow.replaceChildren(input, save, test, cancel);
+              feedback.textContent = '';
+              feedback.dataset.state = '';
+              input.focus();
+            });
+            cancel.addEventListener('click', () => {
+              showSavedState();
+              feedback.textContent = '';
+              feedback.dataset.state = '';
+              edit.focus();
+            });
+            if (account.has_saved_password) showSavedState();
+            else {
+              passwordRow.append(input, save);
+              passwordRow.append(test);
+            }
+            label.append(passwordRow);
+            test.addEventListener('click', async () => {
+              if (editingPassword && !input.value) {
+                feedback.textContent = 'Enter a password to test.';
+                feedback.dataset.state = 'error';
+                input.focus();
+                return;
+              }
+              test.disabled = true;
+              save.disabled = true;
+              edit.disabled = true;
+              cancel.disabled = true;
+              test.textContent = 'Testing…';
+              feedback.textContent = 'Checking login with recorder…';
+              feedback.dataset.state = 'pending';
+              const payload = {username: account.username};
+              if (editingPassword) payload.password = input.value;
+              try {
+                const res = await fetch(`/api/nvrs/${encodeURIComponent(accountsIp)}/test_credentials`, {
+                  method: 'POST', signal, headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify(payload)
+                });
+                const result = await res.json();
+                if (signal.aborted) return;
+                feedback.textContent = result.message || 'Credentials could not be verified.';
+                feedback.dataset.state = res.ok && result.verified === true ? 'success' : 'error';
+              } catch (err) {
+                if (!signal.aborted) {
+                  feedback.textContent = 'Could not test credentials. Check the connection.';
+                  feedback.dataset.state = 'error';
+                }
+              } finally {
+                test.disabled = false;
+                save.disabled = false;
+                edit.disabled = false;
+                cancel.disabled = false;
+                test.textContent = 'Test';
+              }
+            });
             reveal.addEventListener('click', async () => {
-              if (input.type === 'text') {
-                input.type = 'password';
-                reveal.textContent = 'Show saved';
+              if (reveal.getAttribute('aria-pressed') === 'true') {
+                hideSavedPassword();
                 return;
               }
               reveal.disabled = true;
+              edit.disabled = true;
               try {
                 const res = await fetch(`/api/nvrs/${encodeURIComponent(accountsIp)}/account_password?username=${encodeURIComponent(account.username)}`, {signal, cache: 'no-store'});
                 const result = await res.json();
                 if (signal.aborted) return;
                 if (!res.ok) throw new Error(result.message || 'Could not load password.');
-                input.value = result.password;
-                input.type = 'text';
-                reveal.textContent = 'Hide';
-                feedback.textContent = 'Saved in this app';
+                reveal.textContent = result.password;
+                reveal.dataset.revealed = 'true';
+                reveal.setAttribute('aria-pressed', 'true');
+                reveal.setAttribute('aria-label', `Hide saved password for ${account.username}`);
+                hideTimer = setTimeout(hideSavedPassword, 15000);
+                feedback.textContent = '';
               } catch (err) { if (!signal.aborted) feedback.textContent = err.message; }
-              finally { reveal.disabled = false; }
+              finally { reveal.disabled = false; edit.disabled = false; }
             });
             card.addEventListener('submit', async e => {
               e.preventDefault();
+              if (!editingPassword || save.disabled) return;
               if (!input.value) { feedback.textContent = 'Enter a password first.'; return; }
               save.disabled = true;
+              test.disabled = true;
+              cancel.disabled = true;
+              feedback.dataset.state = '';
               try {
                 const res = await fetch(`/api/nvrs/${encodeURIComponent(accountsIp)}/account_password`, {
                   method: 'PUT', signal, headers: {'Content-Type': 'application/json'},
@@ -955,18 +1153,15 @@
                 const result = await res.json();
                 if (signal.aborted) return;
                 if (!res.ok) throw new Error(result.message || 'Could not save password.');
-                input.type = 'password';
-                input.value = '';
-                input.placeholder = 'Password saved in app';
-                reveal.disabled = false;
-                reveal.textContent = 'Show saved';
-                feedback.textContent = 'Saved in app. Recorder password unchanged.';
+                account.has_saved_password = true;
+                showSavedState();
+                reveal.focus();
+                feedback.textContent = 'Password saved.';
               } catch (err) { if (!signal.aborted) feedback.textContent = err.message; }
-              finally { save.disabled = false; }
+              finally { save.disabled = false; test.disabled = false; cancel.disabled = false; }
             });
-            buttons.append(reveal, save);
-            card.append(label, buttons, feedback);
-            accountsList.append(card);
+            card.append(identity, label, feedback);
+            section.append(card);
           }
         }
       } catch (err) {

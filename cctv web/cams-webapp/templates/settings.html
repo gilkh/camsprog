@@ -946,6 +946,7 @@
                   <div id="auto-sync-nvrs" class="auto-sync-targets"></div>
                   <p id="auto-sync-selection-status" class="help-text" role="status"></p>
                 </fieldset>
+                <label style="display: flex; gap: 10px; align-items: center; margin-bottom: 16px;"><input type="checkbox" id="auto-sync-match-warning" /> Use the dashboard's red underline threshold</label>
                 <div class="form-row">
                   <div class="form-group">
                     <label for="auto-sync-threshold">Sync when drift exceeds (minutes)</label>
@@ -1734,6 +1735,8 @@
       document.getElementById('auto-sync-scope').addEventListener('change', updateAutoSyncSelection);
 
       async function loadAutoTimeSync(policy = {}) {
+        document.getElementById('auto-sync-match-warning').checked = policy.match_warning_threshold === true;
+        document.getElementById('auto-sync-threshold').disabled = policy.match_warning_threshold === true;
         document.getElementById('auto-sync-enabled').checked = policy.enabled === true;
         document.getElementById('auto-sync-scope').value = policy.scope || 'all';
         document.getElementById('auto-sync-threshold').value = (policy.threshold_seconds ?? 180) / 60;
@@ -1794,10 +1797,14 @@
         }
       }
 
+      document.getElementById('auto-sync-match-warning').addEventListener('change', e => {
+        document.getElementById('auto-sync-threshold').disabled = e.target.checked;
+      });
       document.getElementById('auto-time-sync-form').addEventListener('submit', async e => {
         e.preventDefault();
         const policy = {
           enabled: document.getElementById('auto-sync-enabled').checked,
+          match_warning_threshold: document.getElementById('auto-sync-match-warning').checked,
           scope: document.getElementById('auto-sync-scope').value,
           nvr_ips: Array.from(document.querySelectorAll('#auto-sync-nvrs input:checked')).map(input => input.value),
           threshold_seconds: Number(document.getElementById('auto-sync-threshold').value) * 60,

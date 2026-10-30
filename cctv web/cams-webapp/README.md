@@ -17,11 +17,23 @@ local recorder accounts, and require ONVIF to be enabled with appropriate permis
 The saved recorder login is used automatically; no second login is requested.
 
 Recorders generally do not return account passwords. Enter a known password once
-and choose **Save in app**, then use **Show saved** to reveal it. Saving here does
+and choose **Save**, then click the saved password dots to reveal it for 15 seconds.
+Click again to hide it sooner. Saving here does
 not change the recorder login or device password. Saved passwords are kept in the
 app's MongoDB database, using the same access boundary as existing recorder logins.
 Revealed values are cleared when the panel closes. Account lookup happens only when
 the panel is opened or reloaded, rather than during monitoring polls.
+
+Choose **Edit** beside a saved password to replace the app's stored value. Use
+**Test** to check the replacement before saving, **Save** to store it, or **Cancel**
+to keep the previous password.
+
+For any account, choose **Test** to check the typed password before saving, or to
+check their saved password. Testing never saves a password or changes the recorder's
+configured login. Milesight uses its native login; Hikvision checks protected device
+information; other recorders check ONVIF device information. Success requires an
+authenticated response. Unsupported checks, permission failures, timeouts, and
+anonymous access are reported as unverified rather than claiming the password works.
 
 ## Time synchronization
 
@@ -39,10 +51,19 @@ and failed totals and a separate outcome for each recorder.
 
 ### Automatic time sync
 
+The dashboard's **Sync all NVRs** button synchronizes all configured recorders,
+including those hidden by search or filters, and shows verified and failed totals.
+Choose **Enable auto sync** on the dashboard to check all recorder clocks every
+minute and automatically correct drift beyond the same threshold used for the
+red time underline. This is saved on the server and continues with the page closed.
+Use **Disable auto sync** to stop automatic corrections. Per-recorder automatic
+successes and failures appear in the dashboard, refreshed every 15 seconds.
+
 In Settings → Time Synchronization, enable automatic time sync and choose all
 recorders or select one or more NVRs. Set the drift threshold (default: 3 minutes)
-and how often to check (default: every minute), then save. This threshold is separate
-from the dashboard's drift warning threshold. Switching off and saving stops new
+and how often to check (default: every minute), then save. Check **Use the dashboard's
+red underline threshold** to follow the warning setting, or uncheck it to set a
+separate correction threshold. Switching off and saving stops new
 automatic corrections.
 
 The server reads a fresh clock from each chosen recorder and corrects it only when

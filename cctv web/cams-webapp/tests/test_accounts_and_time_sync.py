@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app import main
-from app.nvr_accounts import AccountReadError, parse_accounts, read_accounts
+from app.nvr_accounts import AccountReadError, parse_accounts, read_accounts, check_credentials
 from app.nvr_time import clock_close, sync_onvif_time
 
 
@@ -71,6 +71,79 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(result['source'], 'Milesight native')
         self.assertEqual([row['username'] for row in result['accounts']], ['office', 'admin'])
         self.assertNotIn('secret', json.dumps(result))
+
+
+class CredentialTests(unittest.TestCase):
+    def setUp(self):
+        self.nvr = {'ip': '192.0.2.1', 'type': 'Hikvision', 'username': 'admin', 'password': 'admin-secret'}
+
+    def test_hikvision_verifies_supplied_user_without_mutating_login(self):
+        with patch('app.nvr_accounts.requests.get', side_effect=[response(status=401), response('<DeviceInfo/>')]) as get:
+            result = check_credentials(self.nvr, 'viewer', 'viewer-secret')
+        self.assertTrue(result['verified'])
+        auth = get.call_args.kwargs['auth']
+        self.assertEqual((auth.username, auth.password), ('viewer', 'viewer-secret'))
+        self.assertEqual(self.nvr['password'], 'admin-secret')
+        self.assertNotIn('secret', json.dumps(result))
+
+    def test_hikvision_never_verifies_anonymous_or_unexpected_response(self):
+        for replies in [[response('<DeviceInfo/>')], [response(status=401), response('<html>Login</html>')],
+                        [response(status=401), response(status=401)], [response(status=401), response(status=403)]]:
+            with self.subTest(replies=replies), patch('app.nvr_accounts.requests.get', side_effect=replies):
+                self.assertFalse(check_credentials(self.nvr, 'viewer', 'wrong')['verified'])
+
+    def test_milesight_uses_single_native_login_attempt(self):
+        self.nvr['type'] = 'Milesight'
+        for payload, expected in [({'type': 0}, True), ({'type': 1}, False), ({'type': 1, 'blankTime': 60}, False)]:
+            with self.subTest(payload=payload), patch('app.nvr_accounts.requests.Session') as session:
+                post = session.return_value.__enter__.return_value.post
+                post.return_value = response(payload=payload)
+                self.assertEqual(check_credentials(self.nvr, 'viewer', 'test')['verified'], expected)
+                post.assert_called_once()
+                self.assertEqual(post.call_args.kwargs['json']['userName'], 'viewer')
+
+    def test_onvif_requires_authenticated_success_and_never_uses_user_list(self):
+        self.nvr['type'] = 'Uniview'
+        success = '<Envelope><Body><GetDeviceInformationResponse/></Body></Envelope>'
+        with patch('app.nvr_accounts.requests.post', side_effect=[response(status=401), response(success)]) as post:
+            self.assertTrue(check_credentials(self.nvr, 'viewer', 'test')['verified'])
+        self.assertNotIn(b'GetUsers', post.call_args.kwargs['data'])
+        for replies in [[response(success)], [response(status=401), response('<Envelope><Fault/></Envelope>')]]:
+            with patch('app.nvr_accounts.requests.post', side_effect=replies):
+                self.assertFalse(check_credentials(self.nvr, 'viewer', 'test')['verified'])
+
+    def test_timeout_is_inconclusive_and_does_not_expose_exception(self):
+        with patch('app.nvr_accounts.requests.get', side_effect=main.requests.Timeout('secret')):
+            result = check_credentials(self.nvr, 'viewer', 'test')
+        self.assertFalse(result['verified'])
+        self.assertIn('timed out', result['message'])
+        self.assertNotIn('secret', json.dumps(result))
+
+    def test_api_uses_unsaved_input_without_database_write(self):
+        app = MagicMock()
+        with patch.object(main, 'app', app), patch.object(main, '_find_nvr_by_ip', return_value=self.nvr), patch.object(main, 'check_credentials', return_value={'verified': True, 'message': 'Credentials verified.'}) as check:
+            result = main.api_test_account_credentials(self.nvr['ip'], main.AccountCredentialTest(username='viewer', password='typed-secret'))
+        check.assert_called_once_with(self.nvr, 'viewer', 'typed-secret')
+        app.state.db.__getitem__.assert_not_called()
+        self.assertEqual(result.headers['cache-control'], 'no-store')
+        self.assertNotIn('secret', result.body.decode())
+
+    def test_api_saved_password_stays_on_server(self):
+        app = MagicMock()
+        app.state.db['nvr_account_passwords'].find_one.return_value = {'password': 'saved-secret'}
+        with patch.object(main, 'app', app), patch.object(main, '_find_nvr_by_ip', return_value=self.nvr), patch.object(main, 'check_credentials', return_value={'verified': True, 'message': 'Credentials verified.'}) as check:
+            result = main.api_test_account_credentials(self.nvr['ip'], main.AccountCredentialTest(username='viewer'))
+        check.assert_called_once_with(self.nvr, 'viewer', 'saved-secret')
+        app.state.db['nvr_account_passwords'].update_one.assert_not_called()
+        self.assertNotIn('secret', result.body.decode())
+
+    def test_missing_saved_password_does_not_attempt_login(self):
+        app = MagicMock()
+        app.state.db['nvr_account_passwords'].find_one.return_value = None
+        with patch.object(main, 'app', app), patch.object(main, '_find_nvr_by_ip', return_value=self.nvr), patch.object(main, 'check_credentials') as check:
+            result = main.api_test_account_credentials(self.nvr['ip'], main.AccountCredentialTest(username='viewer'))
+        self.assertEqual(result.status_code, 404)
+        check.assert_not_called()
 
 
 class SyncTests(unittest.TestCase):

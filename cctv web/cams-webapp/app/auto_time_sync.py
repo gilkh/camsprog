@@ -9,7 +9,8 @@ from .nvr_time import clock_offset, read_device_clock
 
 
 DEFAULT_POLICY = {"enabled": False, "scope": "all", "nvr_ips": [],
-                  "threshold_seconds": 180, "check_interval_seconds": 60}
+                  "threshold_seconds": 180, "check_interval_seconds": 60,
+                  "match_warning_threshold": False}
 
 
 def validate_policy(value):
@@ -18,6 +19,8 @@ def validate_policy(value):
     policy = {**DEFAULT_POLICY, **value}
     if type(policy["enabled"]) is not bool:
         raise ValueError("Automatic time sync enabled must be true or false.")
+    if type(policy["match_warning_threshold"]) is not bool:
+        raise ValueError("Match warning threshold must be true or false.")
     if policy["scope"] not in ("all", "selected"):
         raise ValueError("Choose all NVRs or selected NVRs.")
     ips = policy["nvr_ips"]
@@ -47,7 +50,10 @@ class AutoTimeSync:
 
     def policy(self):
         try:
-            policy = validate_policy(self.get_settings().get("auto_time_sync", {}))
+            settings = self.get_settings()
+            policy = validate_policy(settings.get("auto_time_sync", {}))
+            if policy["match_warning_threshold"]:
+                policy["threshold_seconds"] = max(30, int(settings.get("time_tolerance", 120)))
             with self.lock:
                 self.status.pop("settings_error", None)
             return policy
