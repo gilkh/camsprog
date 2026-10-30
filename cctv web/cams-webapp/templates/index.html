@@ -1005,7 +1005,9 @@
             fieldTitle.textContent = 'Saved password';
             label.append(fieldTitle);
             const input = document.createElement('input');
-            input.type = 'password';
+            input.type = 'text';
+            input.spellcheck = false;
+            input.autocapitalize = 'none';
             input.autocomplete = 'new-password';
             input.maxLength = 1024;
             input.placeholder = 'Enter a password';
